@@ -69,6 +69,57 @@ def backward_hook(grad):
     return grad
 ```
 
+### Elixir (Nx): Ternary Linear Layer with QAT
+
+```elixir
+defmodule TernaryLayer do
+  import Nx.Defn
+
+  @doc """
+  Ternarize a tensor: {-1, 0, +1} with threshold delta.
+  Uses Nx for hardware-accelerated tensor ops.
+  """
+  defn ternarize(w, delta) do
+    Nx.select(w > delta, 1.0,
+      Nx.select(w < -delta, -1.0, 0.0))
+  end
+
+  @doc """
+  Forward pass with Straight-Through Estimator.
+  W_shadow: full-precision shadow weights (FP32)
+  scale: per-channel scale factors
+  x: input tensor
+  """
+  defn forward(w_shadow, scale, x, delta) do
+    # Normalize weights
+    w_norm = w_shadow / Nx.new_axis(scale, 1)
+
+    # Ternarize
+    t = ternarize(w_norm, delta)
+
+    # Reconstruct effective weights
+    w_effective = Nx.new_axis(scale, 1) * t
+
+    # STE: pass gradient through unchanged
+    w_ste = Nx.as_type(w_shadow, Nx.type(w_shadow)) +
+            (w_effective - Nx.as_type(w_shadow, Nx.type(w_shadow)))
+            |> Nx.as_type(Nx.type(w_shadow))
+
+    Nx.dot(x, w_ste)
+  end
+
+  @doc """
+  Sparsity regularization loss.
+  Encourages weights toward zero by penalizing non-zero entries.
+  """
+  defn sparsity_loss(w, delta, lambda) do
+    t = ternarize(w, delta)
+    density = Nx.mean(Nx.abs(t))
+    lambda * density
+  end
+end
+```
+
 ---
 
 ## 3.4 Straight-Through Estimator Variants

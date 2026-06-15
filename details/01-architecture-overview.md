@@ -18,6 +18,38 @@ If every weight `wᵢⱼ` is constrained to `{-1, 0, +1}`, multiplication simpli
 
 The entire multiply-accumulate (MAC) unit becomes an add/subtract/skip unit. No multiplier is needed.
 
+### Elixir: Core Ternary Operation
+
+```elixir
+defmodule TernaryMAC do
+  @type trit :: -1 | 0 | 1
+  @type activation :: number()
+
+  @doc """
+  Ternary multiply: weight (-1, 0, +1) × activation.
+  No real multiplication needed — just add, subtract, or skip.
+  """
+  @spec trit_mul(trit(), activation()) :: activation()
+  def trit_mul(1, x), do: x
+  def trit_mul(-1, x), do: -x
+  def trit_mul(0, _x), do: 0
+
+  @doc """
+  Dot product of two lists using ternary weights and activations.
+  """
+  @spec dot_product([trit()], [activation()]) :: activation()
+  def dot_product(weights, activations) do
+    weights
+    |> Enum.zip(activations)
+    |> Enum.reduce(0, fn
+      {1, x}, acc -> acc + x
+      {-1, x}, acc -> acc - x
+      {0, _}, acc -> acc
+    end)
+  end
+end
+```
+
 ---
 
 ## 1.2 Hybrid Precision Model

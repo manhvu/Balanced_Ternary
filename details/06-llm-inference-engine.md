@@ -33,6 +33,85 @@ A standard transformer decoder layer consists of:
    x = layernorm(x)        (FP16)
 ```
 
+### Elixir: Decode-Phase Matrix-Vector Kernel
+
+```elixir
+defmodule TernaryDecode do
+  @type packed :: non_neg_integer()         # 16-bit packed word
+  @type scale :: float()
+  @type scale_vec :: [scale()]
+
+  @doc """
+  Ternary matrix-vector product for decode phase.
+  Weights are stored as packed trit rows (16-bit words),
+  each row corresponds to one output channel.
+  """
+  @spec decode([packed()], scale_vec(), [integer()]) :: [float()]
+  def decode(weight_rows, scales, activations) do
+    weight_rows
+    |> Enum.zip(scales)
+    |> Enum.map(fn {packed_row, alpha} ->
+      sum = unpack_and_accumulate(packed_row, activations)
+      alpha * sum
+    end)
+  end
+
+  @doc """
+  Unpack a 16-bit row of 10 trits and accumulate against
+  the activation vector (sparse gather-add).
+  Skips zero weights to exploit sparsity.
+  """
+  defp unpack_and_accumulate(packed, activations) do
+    # Unpack 10 trits from the 16-bit word
+    trits = unpack10(packed)
+
+    # Only process non-zero trits
+    trits
+    |> Enum.zip(activations)
+    |> Enum.reduce(0, fn
+      {1, x}, acc -> acc + x
+      {-1, x}, acc -> acc - x
+      {0, _}, acc -> acc
+    end)
+  end
+
+  @doc """
+  Unpack a 16-bit value to 10 trits (base-3 extraction).
+  """
+  defp unpack10(packed) do
+    do_unpack10(packed, [])
+    |> Enum.reverse()
+  end
+
+  defp do_unpack10(0, acc), do: acc ++ List.duplicate(-1, 10 - length(acc))
+  defp do_unpack10(v, acc) when length(acc) < 10 do
+    digit = rem(v, 3)
+    trit = case digit do
+             0 -> -1
+             1 ->  0
+             2 ->  1
+           end
+    do_unpack10(div(v, 3), [trit | acc])
+  end
+  defp do_unpack10(_, acc), do: acc
+
+  @doc """
+  Batched decode across all layers in the transformer.
+  Each layer processes projections sequentially.
+  """
+  @spec forward([layer()], [integer()]) :: [float()]
+  def forward(layers, input_activations) do
+    Enum.reduce(layers, input_activations, fn layer, x ->
+      x |> layer.q_proj.call()
+        |> Kernel.+(layer.residual |> maybe_skip())
+    end)
+  end
+
+  defp maybe_skip(nil), do: 0
+  defp maybe_skip(val), do: val
+end
+```
+
 ---
 
 ## 6.2 Prefill vs Decode Phase

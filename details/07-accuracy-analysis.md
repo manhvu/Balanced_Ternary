@@ -32,6 +32,102 @@ Trend: Larger models tolerate quantization better.
 | LLaMA-13B | WikiText | 5.1 | 5.3-5.7 | ~0.2-0.6 |
 
 **Key insight**: Accuracy loss is model-dependent and training-dependent. With QAT and knowledge distillation, loss can be minimized to <1% for large models.
+Benchmarking a ternary model requires comparing its outputs against a baseline. This analysis helps determine the optimal sparsity level, scale method, and per-layer precision allocation.
+
+### Elixir: Validation Harness
+
+```elixir
+defmodule TernaryValidation do
+  @type reference :: [float()]
+  @type candidate :: [float()]
+  @type metric :: %{required(String.t()) => float()}
+
+  @doc """
+  Compute perplexity from log probabilities.
+  PPL = exp(-1/N × Σ log P(token_i))
+  """
+  @spec perplexity([float()]) :: float()
+  def perplexity(log_probs) do
+    n = length(log_probs)
+    avg_neg_log_lik = Enum.sum(log_probs) / n
+    :math.exp(-avg_neg_log_lik)
+  end
+
+  @doc """
+  Per-layer sensitivity analysis.
+  Compare perplexity when each layer is ternarized vs kept in FP16.
+  Returns a ranked list of layers by sensitivity.
+  """
+  @spec layer_sensitivity(%{atom() => [float()]}) :: [{atom(), float()}]
+  def layer_sensitivity(results) do
+    baseline = Map.get(results, :baseline, 0.0)
+
+    results
+    |> Enum.reject(fn {key, _} -> key == :baseline end)
+    |> Enum.map(fn {layer, ppl} ->
+      delta = ppl - baseline
+      {layer, delta}
+    end)
+    |> Enum.sort_by(fn {_, delta} -> delta end,
+         :desc)
+  end
+
+  @doc """
+  Compute accuracy metrics for classification.
+  Returns accuracy, precision, recall, F1.
+  """
+  @spec classification_report([integer()], [integer()]) :: metric()
+  def classification_report(predictions, ground_truth) do
+    n = length(predictions)
+    correct = Enum.zip(predictions, ground_truth)
+              |> Enum.count(fn {p, t} -> p == t end)
+
+    true_pos = Enum.zip(predictions, ground_truth)
+               |> Enum.count(fn {p, t} -> p == 1 and t == 1 end)
+    false_pos = Enum.zip(predictions, ground_truth)
+                |> Enum.count(fn {p, t} -> p == 1 and t == 0 end)
+    false_neg = Enum.zip(predictions, ground_truth)
+                |> Enum.count(fn {p, t} -> p == 0 and t == 1 end)
+
+    precision = if true_pos + false_pos > 0,
+      do: true_pos / (true_pos + false_pos), else: 0.0
+    recall = if true_pos + false_neg > 0,
+      do: true_pos / (true_pos + false_neg), else: 0.0
+    f1 = if precision + recall > 0,
+      do: 2 * precision * recall / (precision + recall), else: 0.0
+
+    %{
+      "accuracy" => correct / n,
+      "precision" => precision,
+      "recall" => recall,
+      "f1" => f1
+    }
+  end
+
+  @doc """
+  Sweep delta threshold and report best value.
+  Finds the delta that minimizes perplexity.
+  """
+  @spec sweep_delta([float()], [float()], [float()]) :: {float(), float()}
+  def sweep_delta(weights, activations, deltas) do
+    deltas
+    |> Enum.map(fn delta ->
+      ternarized = TernaryQuantizer.ternarize_layer(
+                     [weights], delta) |> hd()
+
+      # Reconstructed output
+      dot = TernaryMAC.dot_product(ternarized, activations)
+
+      # Measure reconstruction error (proxy for PPL)
+      error = abs(dot - Enum.zip(weights, activations)
+                         |> Enum.reduce(0, fn {w, x}, acc -> acc + w * x end)
+
+      {delta, error}
+    end)
+    |> Enum.min_by(fn {_, error} -> error end)
+  end
+end
+```
 
 ---
 

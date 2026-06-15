@@ -16,7 +16,7 @@ Invalid state: `Wire A = 1, Wire B = 1` (not used).
 
 ---
 
-## 9.2 Hardware Benefits
+### Hardware Benefits
 
 | Property | Single Wire (Analog) | Differential (Two Wires) |
 |----------|---------------------|--------------------------|
@@ -27,6 +27,76 @@ Invalid state: `Wire A = 1, Wire B = 1` (not used).
 | Zero detection | Voltage comparison | Both wires low |
 | Timing | Voltage settling | Logic level only |
 | Standard CMOS | Requires analog | Fully digital |
+
+### Elixir: Differential Encoder/Decoder
+
+```elixir
+defmodule DifferentialEncoding do
+  @type trit :: -1 | 0 | 1
+  @type wire_pair :: {0 | 1, 0 | 1}  # {wire_a, wire_b}
+
+  @doc """
+  Encode a trit into a differential wire pair (A, B).
+
+    T (-1) → {0, 1}  (subtract)
+    0      → {0, 0}  (skip)
+    1 (+1) → {1, 0}  (add)
+  """
+  @spec encode(trit()) :: wire_pair()
+  def encode(-1), do: {0, 1}
+  def encode(0),  do: {0, 0}
+  def encode(1),  do: {1, 0}
+
+  @doc """
+  Decode a wire pair back to a trit.
+  Returns :error on invalid state {1, 1}.
+  """
+  @spec decode(wire_pair()) :: {:ok, trit()} | {:error, String.t()}
+  def decode({0, 0}), do: {:ok, 0}
+  def decode({0, 1}), do: {:ok, -1}
+  def decode({1, 0}), do: {:ok, 1}
+  def decode({1, 1}), do: {:error, "invalid state"}
+
+  @doc """
+  Negate a trit by swapping the wire pair.
+  This is the key advantage of differential encoding:
+  negation is a free wire swap with no inverter needed.
+  """
+  @spec negate(trit()) :: trit()
+  def negate(-1), do: 1
+  def negate(0),  do: 0
+  def negate(1),  do: -1
+
+  @doc """
+  Show negation as wire swap:
+    {A, B} → {B, A}
+  """
+  @spec negate_wires(wire_pair()) :: wire_pair()
+  def negate_wires({a, b}), do: {b, a}
+
+  @doc """
+  Compute unit: given activation x and wire pair (A,B),
+  return the contributed value.
+
+  (0,0) → 0       (skip)
+  (0,1) → -x      (subtract)
+  (1,0) →  x      (add)
+  """
+  @spec compute_pe(number(), wire_pair()) :: number()
+  def compute_pe(_x, {0, 0}), do: 0
+  def compute_pe(x, {0, 1}), do: -x
+  def compute_pe(x, {1, 0}), do: x
+
+  @doc """
+  Pack a list of trits into a flat list of differential wire pairs
+  for routing on the differential weight bus.
+  """
+  @spec bus_pack([trit()]) :: [{0 | 1, 0 | 1}]
+  def bus_pack(trits) do
+    Enum.map(trits, &encode/1)
+  end
+end
+```
 
 ---
 

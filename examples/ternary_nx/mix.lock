@@ -1,0 +1,5 @@
+%{
+  "complex": {:hex, :complex, "0.7.0", "695632ef9487517aa5d57edd1697801079d622414cb2e1a7cf538b1f9a50f205", [:mix], [], "hexpm", "0ee39c0803129f546e7f3f640da8f021c9e659402bf59da6f7f2c4848f068f8d"},
+  "nx": {:hex, :nx, "0.12.1", "6e9fee43a77646d04faad2ba4e449b9e270c6b23e413f203cb4d81e71c0a617f", [:mix], [{:complex, "~> 0.7", [hex: :complex, repo: "hexpm", optional: false]}, {:telemetry, "~> 0.4.0 or ~> 1.0", [hex: :telemetry, repo: "hexpm", optional: false]}], "hexpm", "ee80f6ae898f68bbfe7f30216b06aab10096231ec99ded1208a827256b23d0fb"},
+  "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
+}

@@ -31,12 +31,66 @@ V ∈ [0, 3¹⁰ − 1] = [0, 59048]
 Stored in a 16-bit unsigned integer.
 ```
 
-### Decoding
+### Elixir: 10-to-16 Packing and Unpacking
 
-```
-For each position k:
-    tₖ = (V / 3ᵏ) mod 3
-    map back: 0→T, 1→0, 2→1
+```elixir
+defmodule TritPacking do
+  @type trit :: -1 | 0 | 1
+
+  @doc """
+  Pack 10 trits into a 16-bit unsigned integer.
+  Each trit is shifted by +1 to make it non-negative:
+    T → 0, 0 → 1, 1 → 2
+  """
+  @spec pack([trit()]) :: non_neg_integer()
+  def pack(trits) when length(trits) == 10 do
+    trits
+    |> Enum.map(&(&1 + 1))          # shift: -1→0, 0→1, +1→2
+    |> Enum.reduce(0, fn digit, acc ->
+       acc * 3 + digit
+     end)
+  end
+
+  @doc """
+  Unpack a 16-bit value into 10 trits.
+  Uses repeated division by 3 to extract base-3 digits.
+  """
+  @spec unpack(non_neg_integer()) :: [trit()]
+  def unpack(packed) when packed <= 59_049 do
+    do_unpack(packed, [])
+    |> Enum.reverse()
+  end
+
+  defp do_unpack(0, acc), do: acc
+  defp do_unpack(v, acc) do
+    digit = rem(v, 3)
+    trit = case digit do
+             0 -> -1   # mapping: 0→T
+             1 ->  0   # 1→0
+             2 ->  1   # 2→+1
+           end
+    do_unpack(div(v, 3), [trit | acc])
+  end
+
+  @doc """
+  Pack a binary weight matrix into a flat list of 16-bit words.
+  Each row is padded to a multiple of 10 trits.
+  """
+  @spec pack_matrix([[trit()]]) :: [non_neg_integer()]
+  def pack_matrix(rows) do
+    Enum.flat_map(rows, fn row ->
+      row
+      |> Enum.chunk_every(10)
+      |> Enum.map(&pad_and_pack/1)
+    end)
+  end
+
+  defp pad_and_pack(chunk) do
+    padded = chunk ++
+             List.duplicate(0, 10 - length(chunk))
+    pack(padded)
+  end
+end
 ```
 
 ### Hardware Decoder

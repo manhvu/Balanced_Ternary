@@ -1,0 +1,17 @@
+# The directory Mix will write compiled artifacts to.
+/_build/
+
+# If it runs locally, it will produce a database configuration.
+/db/
+
+# If the project runs tests, the coverage results.
+/doc/
+
+# Generated on crash/upgrade `mix deps.get` without the `--only` flag.
+/deps/
+
+# Temporary files, e.g. from tests.
+/tmp/
+
+# Generated on `mix ` elixir_ls` or when requested by credential managers.
+/.elixir_ls/

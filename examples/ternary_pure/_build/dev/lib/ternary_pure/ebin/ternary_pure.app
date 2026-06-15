@@ -1,0 +1,1 @@
+{application,ternary_pure,[{modules,['Elixir.TernaryPure','Elixir.TernaryPure.Differential','Elixir.TernaryPure.Layer','Elixir.TernaryPure.MAC','Elixir.TernaryPure.Quantizer','Elixir.TernaryPure.Storage']},{optional_applications,[]},{applications,[kernel,stdlib,elixir,logger]},{description,"ternary_pure"},{registered,[]},{vsn,"0.1.0"}]}.

@@ -73,6 +73,61 @@ Output:  sum to bottom neighbor
          x to right neighbor
 ```
 
+### Elixir: PE and Systolic Array Simulation
+
+```elixir
+defmodule TernaryPE do
+  @type activation :: integer()
+  @type partial_sum :: integer()
+  @type trit :: -1 | 0 | 1
+
+  @doc """
+  Single processing element operation.
+  weight: -1 (T), 0, or +1 (1)
+  """
+  @spec compute(partial_sum(), activation(), trit()) ::
+          {partial_sum(), activation()}
+  def compute(sum, x, weight) do
+    new_sum = case weight do
+                1  -> sum + x
+               -1  -> sum - x
+                0  -> sum          # skip
+             end
+    {new_sum, x}  # forward x to right neighbor
+  end
+end
+
+defmodule SystolicArray do
+  @type matrix :: [[integer()]]
+  @type trits :: [[-1 | 0 | 1]]
+
+  @doc """
+  Simulate a 2D systolic array for ternary GEMM.
+  weights: list of columns, each column is a list of trits.
+  activations: list of input activation vectors.
+  Returns accumulated sums per column.
+  """
+  @spec gemm(trits(), matrix()) :: [integer()]
+  def gemm(weights, activations) do
+    # Initialize partial sums to zero
+    n_cols = length(weights)
+    init_sums = List.duplicate(0, n_cols)
+
+    # Stream activations row by row through the array
+    Enum.reduce(activations, init_sums, fn row, sums ->
+      # Each PE column processes one weight per row
+      Enum.zip_with(weights, sums, fn col, acc ->
+        Enum.zip_with(col, row, fn w, x ->
+          TernaryPE.compute(0, x, w) |> elem(0)
+        end)
+        |> Enum.sum()
+        |> Kernel.+(acc)
+      end)
+    end)
+  end
+end
+```
+
 ### Systolic Array
 
 ```

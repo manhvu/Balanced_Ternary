@@ -16,6 +16,146 @@ Binary neural networks (BNN) constrain weights to `{-1, +1}`.
 
 **Ternary wins because of the zero state.** It allows sparsity and better accuracy.
 
+### Elixir: Format Comparison Benchmark
+
+```elixir
+defmodule FormatComparison do
+  @type format :: :ternary | :binary | :int8 | :fp32
+  @type metric :: %{format() => %{
+                   accuracy: float(),
+                   model_size_mb: float(),
+                   mac_cost_per_op: integer()
+                 }}
+
+  @doc """
+  Compare all formats head-to-head on the same dataset.
+  """
+  @spec compare_all(
+          [{weights :: [float()], activations :: [float()]}],
+          [integer()],
+          float()
+        ) :: metric()
+  def compare_all(dataset, ground_truth, delta) do
+    # Evaluate each format
+    %{
+      fp32:   evaluate(:fp32, dataset, ground_truth),
+      int8:   evaluate(:int8, dataset, ground_truth),
+      binary: evaluate(:binary, dataset, ground_truth),
+      ternary: evaluate(:ternary, dataset, ground_truth, delta)
+    }
+  end
+
+  @doc """
+  Evaluate a single format.
+  """
+  def evaluate(:ternary, dataset, truth, delta) do
+    correct = dataset
+              |> Enum.zip(truth)
+              |> Enum.count(fn {{w, x}, t} ->
+                tern = Enum.map(w, &TernaryQuantizer.ternarize(&1, delta))
+                dot = TernaryMAC.dot_product(tern, x)
+                pred = if dot > 0, do: 1, else: 0
+                pred == t
+              end)
+
+    %{
+      accuracy: correct / length(truth),
+      model_size_mb: model_size(:ternary, length(hd(Enum.map(dataset, fn {w, _} -> w end)))),
+      mac_cost_per_op: 1  # add/sub/skip
+    }
+  end
+
+  def evaluate(:binary, dataset, truth) do
+    correct = dataset
+              |> Enum.zip(truth)
+              |> Enum.count(fn {{w, x}, t} ->
+                bin = Enum.map(w, fn w -> if w >= 0, do: 1, else: -1 end)
+                dot = TernaryMAC.dot_product(bin, x)
+                pred = if dot > 0, do: 1, else: 0
+                pred == t
+              end)
+
+    %{
+      accuracy: correct / length(truth),
+      model_size_mb: model_size(:binary, length(hd(Enum.map(dataset, fn {w, _} -> w end)))),
+      mac_cost_per_op: 1  # XNOR-popcount
+    }
+  end
+
+  def evaluate(:int8, dataset, truth) do
+    correct = dataset
+              |> Enum.zip(truth)
+              |> Enum.count(fn {{w, x}, t} ->
+                dot = Enum.zip(w, x)
+                      |> Enum.reduce(0, fn {w_i, x_i}, acc ->
+                        w8 = trunc(w_i * 127) |> max(-128) |> min(127)
+                        x8 = trunc(x_i) |> max(-128) |> min(127)
+                        acc + w8 * x8
+                      end)
+                pred = if dot > 0, do: 1, else: 0
+                pred == t
+              end)
+
+    %{
+      accuracy: correct / length(truth),
+      model_size_mb: model_size(:int8, length(hd(Enum.map(dataset, fn {w, _} -> w end)))),
+      mac_cost_per_op: 8
+    }
+  end
+
+  def evaluate(:fp32, dataset, truth) do
+    correct = dataset
+              |> Enum.zip(truth)
+              |> Enum.count(fn {{w, x}, t} ->
+                dot = Enum.zip(w, x)
+                      |> Enum.reduce(0, fn {w_i, x_i}, acc -> acc + w_i * x_i end)
+                pred = if dot > 0, do: 1, else: 0
+                pred == t
+              end)
+
+    %{
+      accuracy: correct / length(truth),
+      model_size_mb: model_size(:fp32, length(hd(Enum.map(dataset, fn {w, _} -> w end)))),
+      mac_cost_per_op: 32
+    }
+  end
+
+  @doc """
+  Estimate model size in MB for 1B parameters.
+  """
+  defp model_size(:ternary, _n_params) do
+    1_000_000_000 * 1.585 / 8 / 1024 / 1024 |> Float.round(1)
+  end
+  defp model_size(:binary, _n_params), do: 1_000_000_000 * 1 / 8 / 1024 / 1024 |> Float.round(1)
+  defp model_size(:int8, _n_params), do:  1_000_000_000 * 8 / 8 / 1024 / 1024 |> Float.round(1)
+  defp model_size(:fp32, _n_params), do: 1_000_000_000 * 32 / 8 / 1024 / 1024 |> Float.round(1)
+
+  @doc """
+  Print summary comparison table.
+  """
+  @spec print_summary(metric()) :: :ok
+  def print_summary(metrics) do
+    IO.puts("Format   | Accuracy | Size (1B) | MAC cost")
+    IO.puts("---------|----------|-----------|---------")
+
+    Enum.each([:fp32, :int8, :binary, :ternary], fn fmt ->
+      m = metrics[fmt]
+      IO.puts("#{pad(fmt, 7)} | " <>
+              "#{pad(Float.round(m.accuracy, 4), 7)} | " <>
+              "#{pad(m.model_size_mb, 8)} MB | " <>
+              "#{m.mac_cost_per_op}")
+    end)
+  end
+
+  defp pad(val, width) when is_atom(val), do: pad(Atom.to_string(val), width)
+  defp pad(val, width) when is_float(val), do: pad(Float.to_string(val), width)
+  defp pad(val, width) when is_integer(val), do: pad(Integer.to_string(val), width)
+  defp pad(str, width) when is_binary(str) do
+    str <> String.duplicate(" ", max(0, width - String.length(str)))
+  end
+end
+```
+
 ---
 
 ## 10.2 Why Balanced Ternary vs INT8

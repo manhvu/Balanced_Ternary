@@ -31,6 +31,105 @@ Week 3-4: Software Infrastructure
 - Baseline measurements (PPL, latency estimate)
 ```
 
+### Elixir: Phase 0 Foundation Module
+
+```elixir
+defmodule TernaryResearch do
+  @moduledoc """
+  Foundation module for the balanced ternary research project.
+  Provides implementations for Phase 0-1: basic building blocks
+  that are later composed into training and inference pipelines.
+  """
+
+  @doc """
+  Simulate training loop for ternary quantization research.
+  Track: accuracy, sparsity, and reconstruction error per epoch.
+  """
+  @spec simulate_training(
+          keyword(),
+          [{keyword(), [float()], [float()]}])
+        :: %{String.t() => [float()]}
+  def simulate_training(config, dataset) do
+    learning_rate = Keyword.get(config, :learning_rate, 0.01)
+    delta = Keyword.get(config, :delta, 0.5)
+    n_epochs = Keyword.get(config, :epochs, 100)
+
+    # Track metrics over time
+    %{
+      "accuracy" => [],
+      "sparsity" => [],
+      "reconstruction_error" => []
+    }
+  end
+
+  @doc """
+  Generate a synthetic dataset for testing ternary quantization.
+  Creates random weight-activity pairs with known sparsity.
+  """
+  @spec synthetic_dataset(pos_integer(), pos_integer(), float()) ::
+          [{weights :: [float()], activations :: [float()]}]
+  def synthetic_dataset(n_samples, dim, sparsity_target) do
+    Enum.map(1..n_samples, fn _ ->
+      # Random weights with some zeros
+      weights = Enum.map(1..dim, fn _ ->
+        if :rand.uniform() < sparsity_target,
+          do: 0.0,
+          else: (:rand.uniform() * 2 - 1) * 0.5
+      end)
+      activations = Enum.map(1..dim, fn _ ->
+        :rand.uniform(100) - 50
+      end)
+
+      {weights, activations}
+    end)
+  end
+
+  @doc """
+  Compare ternary, INT8, and FP32 across multiple metrics.
+  """
+  @spec benchmark_formats(
+          [{weights :: [float()], activations :: [float()]}],
+          float())
+        :: %{String.t() => float()}
+  def benchmark_formats(dataset, delta) do
+    results = dataset
+      |> Enum.map(fn {w, a} ->
+        # FP32 reference
+        fp32_dot = Enum.zip(w, a)
+                  |> Enum.reduce(0, fn {w_i, a_i}, acc -> acc + w_i * a_i end)
+
+        # Ternary
+        t = Enum.map(w, &TernaryQuantizer.ternarize(&1, delta))
+        ternary_dot = TernaryMAC.dot_product(t, a)
+
+        # INT8 simulation (truncate to 8-bit range)
+        int8_dot = Enum.zip(w, a)
+                  |> Enum.reduce(0, fn {w_i, a_i}, acc ->
+                    w8 = trunc(w_i * 127) |> max(-128) |> min(127)
+                    a8 = trunc(a_i) |> max(-128) |> min(127)
+                    acc + w8 * a8
+                   end)
+
+        %{
+          fp32: fp32_dot,
+          ternary: ternary_dot,
+          int8: int8_dot
+        }
+      end)
+
+    # Compute mean absolute error vs FP32
+    n = length(results)
+    mae_ternary = results |> Enum.map(fn %{fp32: r, ternary: t} -> abs(r - t) end) |> Enum.sum() |> Kernel./(n)
+    mae_int8 = results |> Enum.map(fn %{fp32: r, int8: i} -> abs(r - i) end) |> Enum.sum() |> Kernel./(n)
+
+    %{
+      "ternary_vs_fp32_mae" => mae_ternary,
+      "int8_vs_fp32_mae" => mae_int8
+    }
+  end
+end
+```
+
 ---
 
 ## 8.2 Phase 1: Small Model Validation (Weeks 5-8)

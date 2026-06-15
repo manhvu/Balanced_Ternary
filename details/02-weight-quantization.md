@@ -12,6 +12,53 @@ Q(w) = -1   if   w < -Δ
 
 Where `Δ` is a threshold.
 
+### Elixir: Basic Ternary Quantizer
+
+```elixir
+defmodule TernaryQuantizer do
+  @type weight :: float()
+  @type trit :: -1 | 0 | 1
+
+  @doc """
+  Quantize a single weight to a ternary value {-1, 0, +1}.
+  Uses delta threshold to determine the zero region.
+  """
+  @spec ternarize(weight(), weight()) :: trit()
+  def ternarize(w, delta) when is_number(w) and is_number(delta) do
+    cond do
+      w > delta  -> 1
+      w < -delta -> -1
+      true       -> 0
+    end
+  end
+
+  @doc """
+  Quantize a whole layer of weights (list of lists).
+  Each inner list is one output channel.
+  """
+  @spec ternarize_layer([[weight()]], weight()) :: [[trit()]]
+  def ternarize_layer(weights, delta) do
+    Enum.map(weights, fn channel ->
+      Enum.map(channel, &ternarize(&1, delta))
+    end)
+  end
+
+  @doc """
+  Compute per-channel MSE-optimal scale factor.
+  scale_j = (W_j · T_j) / (T_j · T_j)
+  """
+  @spec compute_scale([weight()], [trit()]) :: float()
+  def compute_scale(weights, trits) do
+    dot = Enum.zip(weights, trits)
+          |> Enum.reduce(0, fn {w, t}, acc -> acc + w * t end)
+
+    norm_sq = Enum.reduce(trits, 0, fn t, acc -> acc + t * t end)
+
+    if norm_sq == 0, do: 1.0, else: dot / norm_sq
+  end
+end
+```
+
 ---
 
 ## 2.2 Threshold Selection
