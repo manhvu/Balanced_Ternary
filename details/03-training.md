@@ -120,6 +120,24 @@ defmodule TernaryLayer do
 end
 ```
 
+### 3.3.1 Learning Rate Scheduling for QAT
+
+QAT is significantly more sensitive to learning rate than standard fine-tuning. The discrete nature of ternarization means large gradient updates can cause weights to oscillate between quantization bins, destabilizing training. As a rule of thumb, **QAT requires a learning rate 10–100× lower** than the corresponding FP32 fine-tuning rate.
+
+**Cosine annealing with warm restarts** works best for QAT. The smooth decay avoids sudden LR changes that can push weights across the ternarization threshold Δ in bulk, while periodic restarts help escape plateaus caused by the non-convex ternary loss landscape.
+
+| Model Size | Fine-Tune LR | QAT LR (recommended) | Warm-up Steps | Restart Period |
+|------------|-------------|----------------------|---------------|----------------|
+| < 100M params | 1e-4 | 1e–5 – 1e-6 | 200 | 2K steps |
+| 100M – 1B | 3e-5 | 3e-6 – 1e-6 | 500 | 5K steps |
+| 1B – 10B | 1e-5 | 1e-6 – 5e-7 | 1K | 10K steps |
+| > 10B | 5e-6 | 5e-7 – 1e-7 | 2K | 20K steps |
+
+Key guidelines:
+- **Always use warm-up** (linear or cosine) for at least the first 500–2000 steps. Jumping to the target LR immediately causes catastrophic weight re-assignment.
+- **Restart period** should align with the Δ schedule: restart just before each Δ increase so the optimizer can re-stabilize.
+- If loss spikes after a restart, reduce the peak LR by 2× and increase warm-up proportionally.
+
 ---
 
 ## 3.4 Straight-Through Estimator Variants
@@ -167,6 +185,21 @@ L_sparsity = λ × |sparsity(W_ternary) − S_target|
 ```
 
 Train toward a specific sparsity level.
+
+### Sparsity Schedule
+
+Rather than targeting the final sparsity level from the start, it is better to **begin with low sparsity (e.g., 30%) and gradually increase to the target (e.g., 75%)** over the course of training. Starting with high sparsity from the beginning forces too many weights to zero prematurely, which can destroy useful representations and make recovery impossible. A linear or cosine ramp from the initial to the target sparsity over the full training duration gives the optimizer time to identify which weights are truly expendable before committing them to zero.
+
+```
+S_current = S_initial + (S_target − S_initial) × (step / total_steps)
+
+Example schedule:
+  Step 0      → S = 0.30
+  Step 25%    → S = 0.41
+  Step 50%    → S = 0.53
+  Step 75%    → S = 0.64
+  Step 100%   → S = 0.75
+```
 
 ---
 
@@ -235,6 +268,28 @@ Where:
 
 Typical ratio: `α:β:γ:δ = 0.5:0.5:0.01:0.001`
 
+### 3.7.1 Layer-Wise Distillation
+
+Matching only the final output logits is often insufficient for ternary models, whose representational capacity is severely constrained. **Layer-wise distillation** — matching intermediate layer outputs between teacher and student — significantly improves ternary training by providing richer gradient signals at every depth.
+
+The idea is to align the student's hidden representations with the teacher's at each corresponding layer (or at selected layers). This is done via a **hint loss**:
+
+```
+L_hint = Σ_l ||h_student_l − h_teacher_l||²
+```
+
+where `h_student_l` and `h_teacher_l` are the hidden states at layer `l` of the student and teacher respectively. If the teacher and student have different hidden dimensions, a small linear projection `W_l` is learned for each matched layer:
+
+```
+L_hint = Σ_l ||W_l × h_student_l − h_teacher_l||²
+```
+
+Practical tips:
+- **Match every layer** for best results, or at minimum every 3–4 layers.
+- Use a **separate linear adapter** per layer; sharing adapters across layers hurts performance.
+- Weight deeper layers more heavily, as errors compound through the network.
+- The total distillation loss becomes: `L_distill = β₁ × L_logit + β₂ × L_hint`, with `β₂ ≈ 0.1–0.5 × β₁`.
+
 ---
 
 ## 3.8 Training Schedule Example
@@ -256,6 +311,19 @@ Phase 2 (QAT):
         - Clipped STE
         - Gradual Δ increase
         - Warm-up for 500 steps
+
+Phase 2b (Full QAT):
+    Steps: 5K
+    Learning rate: 1e-6 (very low)
+    Description: All layers ternarized simultaneously.
+    Purpose: Fine-tune the fully-ternary model end-to-end
+             after layer-wise QAT stabilizes individual layers.
+    Tricks:
+        - Very small LR to avoid destabilizing ternarized weights
+        - Cosine decay from 1e-6 to 1e-7
+        - No Δ increase (keep Δ fixed at final Phase 2 value)
+        - Monitor per-layer density to ensure no catastrophic
+          weight collapse
 
 Phase 3 (Sparsity):
     Steps: 10K
@@ -350,3 +418,43 @@ class TernaryLinear(nn.Module):
 
         return F.linear(x, W_effective, self.bias)
 ```
+
+---
+
+## 3.12 Distributed Training Considerations
+
+Ternary models can leverage standard distributed training techniques, but the ternary weight constraint introduces nuances that require special handling.
+
+### Data Parallelism (Recommended)
+
+Data parallelism works transparently with ternary training. Each device holds a full replica of the FP32 shadow weights and ternary weights, processes a different mini-batch, and gradients are all-reduced in FP32 before the optimizer step. No changes to the standard DDP/FSDP pipeline are required.
+
+```
+Standard DDP / FSDP:
+  - Each rank: full copy of W_shadow (FP32) + T (ternary)
+  - Gradients: FP32, all-reduced as usual
+  - Optimizer step: updates W_shadow on each rank identically
+  - Ternarization: re-applied locally after each update
+```
+
+**Memory note:** The FP32 shadow weights double the memory footprint compared to a pure ternary model. For very large models, consider keeping only the ternary weights in device memory and maintaining shadow weights in CPU memory (similar to CPU offloading in ZeRO-Infinity), updating them asynchronously.
+
+### Model Parallelism (Requires Special Handling)
+
+Model parallelism (tensor or pipeline parallelism) is more challenging because ternary weights cannot be easily split across devices without unpacking:
+
+- **Tensor parallelism** (splitting individual matrix multiplications across devices) requires that partial results be summed across devices. With ternary weights, each device holds a slice of the ternary values, but the summation of partial FP32 results is unaffected — the ternary constraint is on storage, not on the matmul itself. However, the per-channel scale `α` must be applied *after* the all-reduce, not before, to avoid double-scaling. This means the effective weight `α × T` must be reconstructed on each device from the local ternary slice and the globally-broadcast scale.
+
+- **Pipeline parallelism** (splitting layers across devices) works naturally since each device owns entire layers. The only consideration is that activation tensors passed between stages remain in FP32/BF16 (ternary is weights-only), so inter-device communication is unchanged.
+
+### Practical Recommendations
+
+| Strategy | Works with Ternary? | Notes |
+|----------|-------------------|-------|
+| Data Parallel (DDP) | ✅ Yes | No changes needed |
+| FSDP / ZeRO-3 | ✅ Yes | Shadow weights increase memory; consider CPU offload |
+| Tensor Parallel | ⚠️ Partial | Apply α after all-reduce; verify numerical correctness |
+| Pipeline Parallel | ✅ Yes | No special handling needed |
+| Expert Parallel (MoE) | ✅ Yes | Ternary experts work like dense ternary layers |
+
+**Key takeaway:** Start with data parallelism. It is the simplest and most robust approach for ternary training. Only introduce model parallelism when the model exceeds single-device memory, and be careful with tensor-parallel scale handling.

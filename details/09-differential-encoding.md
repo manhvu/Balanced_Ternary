@@ -16,6 +16,23 @@ Invalid state: `Wire A = 1, Wire B = 1` (not used).
 
 ---
 
+### 9.1.1 Physical Layer Details
+
+The differential weight bus operates with the following electrical characteristics optimized for on-chip routing:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Differential swing | 0.4 V | Peak-to-peak across the pair (A − B) |
+| Common-mode voltage | 0.6 V | Mid-rail bias for noise margin |
+| Termination | Parallel 100 Ω to Vcm | At the receiver (PE) end |
+| Logic levels | 0.4 V / 0.8 V | Low / high relative to ground |
+
+**Termination scheme:** Each differential pair is terminated at the PE receiver with a 100 Ω resistor across A and B, biased to the 0.6 V common-mode voltage. This provides clean signal edges without reflections on the weight bus, even at multi-gigahertz clock rates. No series termination is needed at the driver because the weight bus is a point-to-point topology (one decoder output driving one PE column).
+
+The 0.4 V differential swing is sufficient for reliable detection by the CMOS comparators inside each PE while keeping dynamic power low. The common-mode voltage of 0.6 V (with Vdd = 1.0 V) provides symmetric noise margin above and below the switching threshold.
+
+---
+
 ### Hardware Benefits
 
 | Property | Single Wire (Analog) | Differential (Two Wires) |
@@ -122,6 +139,8 @@ if weight = -1:  subtract x (=> swap wires in transmission)
 
 But since weight is stored digitally, wire swapping is just a routing-level swap of the two wires from the weight register.
 
+> **Negation in the accumulator:** Instead of physically swapping wires, the PE can store the sign bit of the weight and conditionally negate the activation value at the accumulator input. A single XOR gate (for two's complement inversion) plus the sign bit controls whether the adder sees +x or −x. This approach is simpler for pipelined designs because it avoids mid-pipeline wire swaps — the sign bit travels alongside the weight data through pipeline stages, and the conditional negate logic sits cleanly at the accumulator boundary without affecting routing.
+
 ---
 
 ## 9.4 Differential Adder/Subtractor
@@ -178,6 +197,23 @@ Power:            No static current in CMOS
 
 For high-frequency operation (>1 GHz), differential routing on the weight bus can be easier to keep clean than single-ended analog voltage levels.
 
+### 9.6.1 Crosstalk Analysis
+
+Differential pairs have inherently better crosstalk immunity than single-ended signals for two reasons:
+
+1. **Common-mode rejection:** Aggressor noise couples equally onto both wires A and B. Since the receiver detects the *difference* (A − B), the coupled noise cancels out. In a single-ended bus, the same aggressor noise directly corrupts the signal.
+
+2. **Field confinement:** The opposing currents in A and B create opposing magnetic fields that largely cancel at distance, reducing the pair's radiated emissions and susceptibility to far-end crosstalk.
+
+Because of this improved immunity, the differential weight bus can be routed at **tighter pitch** than a single-ended analog bus. Typical spacing rules:
+
+| Bus type | Minimum pitch | Aggressor margin |
+|----------|--------------|-----------------|
+| Single-ended analog | 3× minimum spacing | High sensitivity |
+| Differential digital | 1.5× minimum spacing | Common-mode rejected |
+
+This means the 2× wire count of differential encoding partially pays for itself in routing density — the tighter pitch recovers some of the area lost to the extra wires.
+
 ---
 
 ## 9.7 Area Comparison
@@ -191,6 +227,8 @@ For high-frequency operation (>1 GHz), differential routing on the weight bus ca
 | Area overhead | Medium | Low |
 
 **Differential encoding adds ~2× wire count but eliminates analog components.**
+
+> **Wire routing overhead:** While differential encoding doubles the wire count compared to a single-wire scheme, the wires are purely digital and can be routed in standard metal layers (M2–M6) without special shielding, guard rings, or analog-aware design rules. This keeps the physical design flow compatible with standard digital place-and-route tools. The area cost of the extra wires is typically 5–10% of the total PE array area, which is modest compared to the area saved by eliminating ADCs, DACs, and voltage comparators.
 
 ---
 
@@ -241,3 +279,61 @@ Differential encoding is especially well-suited for ternary neural network accel
 5. **Digital synthesis** → Designs can use standard EDA tools
 
 It is the recommended trit encoding for the ternary accelerators described in this document.
+
+---
+
+## 9.11 Testability and DFT
+
+Testing the differential encoding path requires structured design-for-test (DFT) techniques to ensure manufacturing quality and field reliability. Three complementary strategies cover the full path:
+
+### 1. Built-In Self-Test (BIST) for the Decoder
+
+Each weight decoder includes a BIST engine that exercises all three valid states and the invalid state without external probe access:
+
+```
+BIST sequence:
+  1. Apply known trit pattern (e.g., [1, 0, -1, 1, -1, ...])
+  2. Encode → differential pairs on the bus
+  3. Loop back at the PE receiver into a MISR (multi-input signature register)
+  4. Compare final signature against golden reference
+```
+
+The BIST runs at power-on and can be triggered in-field for periodic health checks. A mismatch flags a decoder fault, enabling the system to remap to a spare PE column.
+
+### 2. Scan Chains for Weight Registers
+
+The two-bit weight registers in each PE are chained into standard scan flip-flops:
+
+```
+Scan chain path:
+  SO ──► [PE₀ weight_reg] ──► [PE₁ weight_reg] ──► ... ──► [PEₙ weight_reg] ──► SI
+```
+
+This allows:
+- **Stuck-at fault testing** of the weight storage bits (write 0/1, scan out, verify)
+- **At-speed launch-on-capture** testing of the register-to-bus path
+- **Debug visibility** — the full weight state can be dumped via JTAG for post-silicon validation
+
+The scan chain adds ~15% area overhead to the weight register file but provides 99%+ fault coverage for the storage elements.
+
+### 3. At-Speed Testing of the Weight Bus
+
+The differential weight bus itself is tested at operating frequency using a pattern generator at the decoder output and a checker at the PE receiver:
+
+```
+Test pattern: Alternating (1,0) and (0,1) on each pair → maximum switching
+Checker:      Validates correct arrival of both polarities at the PE
+```
+
+This catches:
+- **Open/short faults** in the differential pair routing
+- **Timing violations** (setup/hold at the PE input)
+- **Crosstalk-induced bit errors** (by running with adjacent pairs toggling aggressively)
+
+At-speed testing is critical because the weight bus operates at the full accelerator clock rate, and marginal timing defects may only appear at frequency.
+
+| DFT Technique | What It Tests | When Run | Fault Coverage |
+|---------------|---------------|----------|----------------|
+| Decoder BIST | Encode/decode logic | Power-on, in-field | Decoder logic |
+| Scan chains | Weight register stuck-at | Manufacturing test | Storage elements |
+| At-speed bus test | Routing, timing, crosstalk | Manufacturing test | Interconnect |

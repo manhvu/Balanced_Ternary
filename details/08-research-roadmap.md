@@ -31,6 +31,25 @@ Week 3-4: Software Infrastructure
 - Baseline measurements (PPL, latency estimate)
 ```
 
+### 8.1.1 Key Papers to Read
+
+The following 10 papers form the essential reading list for this project:
+
+| # | Paper | Year | Key Contribution |
+|---|-------|------|------------------|
+| 1 | **TTQ** (Ternary Weight Networks) | 2016 | Introduces learnable per-layer scale factors for ternary weights; foundational for all subsequent ternary quantization work. |
+| 2 | **TWN** (Ternary Weight Networks, Ma et al.) | 2016 | Proposes optimal threshold Δ and per-layer scaling; shows near-ImageNet-accuracy with ternary ResNet. |
+| 3 | **DoReFa-Net** | 2016 | General framework for quantizing weights, activations, and gradients to low bit-widths; introduces bit-serial GEMM concept. |
+| 4 | **LUT-GEMM** | 2023 | Replaces arithmetic MAC with table lookups for ultra-low-bit inference; directly relevant to ternary weight decoding and packing. |
+| 5 | **BitNet** (Microsoft) | 2024 | Demonstrates 1-bit LLM inference at scale; BitNet b1.58 uses ternary {-1,0,+1} weights, proving viability for billion-parameter models. |
+| 6 | **QBERT / Q8BERT** | 2019-2020 | Shows INT8 quantization of BERT with minimal accuracy loss; establishes the mixed-precision recipe (ternary weights + higher-precision activations). |
+| 7 | **SparseBERT** | 2021 | Combines pruning and quantization for BERT; demonstrates that structured sparsity + low-bit weights compound memory savings. |
+| 8 | **GOBO** (Google) | 2020 | Compresses BERT weights to 3-4 bits with error compensation; practical insights on weight clustering for ternary-like formats. |
+| 9 | **BinaryBERT** | 2020 | Distills BERT to binary/ternary weights; shows knowledge distillation is critical for low-bit language models. |
+| 10 | **BitBlade** | 2023 | Hardware accelerator for low-bit LLM inference using bit-serial PEs; architectural template for the ternary PE array in this project. |
+
+---
+
 ### Elixir: Phase 0 Foundation Module
 
 ```elixir
@@ -228,6 +247,10 @@ Week 17-18: Sparse Inference
     [ ] Determine optimal per-layer sparsity target
 ```
 
+### Hardware-in-the-Loop Training
+
+During Phase 3, consider **hardware-in-the-loop training**: integrate the cycle-accurate simulator (from Phase 4, started early) directly into the training loop so that each forward/backward pass reports actual simulated latency rather than proxy metrics (FLOP count, sparsity %). This gives the optimizer a direct signal to minimize real latency, not just theoretical compute. The trade-off is ~10-100× slower training iterations, so use it for fine-tuning after initial convergence with proxy metrics.
+
 ### Deliverables
 
 ```
@@ -356,6 +379,18 @@ Week 45-48: Tape-Out Package
 
 ---
 
+### 8.7.1 Alternative: FPGA Product
+
+If ASIC tape-out cost ($2-5M at 7nm) is prohibitive, a standalone **FPGA product** is a viable alternative:
+
+- **Xilinx Versal AI Core (VC1902)** or **Intel Agilex 7 (AGF014)** can host a ternary PE array of 256-512 PEs.
+- The PE array maps naturally to FPGA LUTs + DSP slices; the decoder (5→8, 10→16) is pure combinational logic.
+- **Main limitation: SRAM capacity.** On-chip BRAM on a large FPGA is ~30-50 MB, enough for a ~1B parameter ternary model (1 bit per weight + scale factors) but not for 7B+ without external HBM.
+- External HBM2e (available on Versal HBM variants) removes this ceiling, supporting up to 32 GB.
+- An FPGA product can ship within 12-18 months of a working RTL prototype, vs. 24-36 months for ASIC.
+
+---
+
 ## 8.8 Resource Requirements
 
 | Phase | Compute | Memory | People | Duration |
@@ -380,6 +415,9 @@ Week 45-48: Tape-Out Package
 | Power > 10W target | Medium | Medium | Aggressive clock gating, voltage scaling |
 | No significant accuracy improvement over INT8 | Medium | Low | Focus on memory bandwidth advantage |
 | Hardware bug in PE array | Low | High | Extensive simulation before tape-out |
+| Quantization-aware training too slow | Medium | Medium | Use fewer calibration steps, freeze non-sensitive layers early |
+| Sparsity not hardware-exploitable | Medium | High | Use block sparsity (e.g., 4×4 or 8×8 blocks) to align with PE array dataflow |
+| Compiler toolchain complexity | Medium | Medium | Extend TVM/MLIR with ternary dialect rather than building from scratch |
 
 ---
 
@@ -415,3 +453,24 @@ Week 45-48: Tape-Out Package
 - Power    : ≤10W
 - Silicon  : Tape-out
 ```
+
+---
+
+## 8.11 Publication Strategy
+
+Target the following venues based on the type of results available:
+
+| Venue | Type | What to Target |
+|-------|------|----------------|
+| **ISCA** (International Symposium on Computer Architecture) | Architecture | Full ternary accelerator architecture: PE array, decoder, dataflow, and ASIC PPA numbers. Requires hardware results (FPGA or ASIC). |
+| **MICRO** (International Symposium on Microarchitecture) | Architecture | Microarchitectural innovations: zero-skip clock gating, 5→8 packing, sparse GEMM kernel. Requires cycle-accurate simulation + RTL. |
+| **NeurIPS** (Conference on Neural Information Processing Systems) | ML | Ternary training algorithm: novel STE variant, sparsity regularization, or QAT recipe that achieves SOTA accuracy on ImageNet/LLM benchmarks. |
+| **ICML** (International Conference on Machine Learning) | ML | Theoretical contributions: convergence analysis of ternary optimization, information-theoretic bounds on ternary weight capacity. |
+| **ISSCC / VLSI Symposium** | Circuit | Circuit-level ternary PE design: low-power adder tree, decoder circuit, SRAM macros. Requires silicon or detailed post-layout results. |
+| **FPGA** (ACM/SIGDA International Symposium on FPGA) | Demo | Working FPGA prototype demo: live inference of ternary LLM on FPGA with latency/power measurements. |
+
+**Recommended publication sequence:**
+1. **Year 1:** Submit ternary training method to NeurIPS or ICML (Phases 1-2 results).
+2. **Year 2:** Submit accelerator architecture to ISCA or MICRO (Phases 4-5 results).
+3. **Year 2-3:** Submit FPGA demo paper to FPGA symposium (Phase 5 results).
+4. **Year 3:** Submit ASIC PPA to ISSCC/VLSI (Phase 6 results).

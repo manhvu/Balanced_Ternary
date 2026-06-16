@@ -157,6 +157,30 @@ Ternary excels in the **decode phase** because:
 - No repeated DRAM reads for weights
 - KV cache reads dominate, and ternary reduces those too if KV cache is ternarized
 
+### 6.2.1 Continuous Batching
+
+Continuous batching (also called in-flight batching) is a scheduling strategy where new requests are added to a currently running batch without waiting for all in-flight requests to finish. When one request completes (e.g., it produces an <eos> token or hits its max length), a new waiting request immediately takes its slot.
+
+```
+Traditional static batching:
+  Batch: [Req1, Req2, Req3]
+  Req1 finishes at step 5 → idle slots until all done
+  Next batch starts only after step 8
+
+Continuous batching:
+  Batch: [Req1, Req2, Req3]
+  Req1 finishes at step 5 → Req4 immediately inserted
+  Batch: [Req4, Req2, Req3]  (no idle slots)
+```
+
+Benefits for ternary accelerators:
+
+- **Throughput improvement**: 2–3× for variable-length workloads (e.g., chat, code generation) where request lengths vary significantly.
+- **SRAM utilization**: The ternary weight SRAM is already loaded; swapping in a new request only requires updating the activation buffer and KV cache pointers, not reloading weights.
+- **Latency**: Tail latency improves because short requests don't wait for long ones to finish.
+
+The main requirement is that the scratchpad SRAM must hold the KV caches for all concurrent requests. With INT4 KV cache and 8 MB SRAM, a typical edge configuration supports 4–8 concurrent requests at sequence length 2048.
+
 ---
 
 ## 6.3 Ternary GEMM Kernel (Decode Phase)
@@ -211,6 +235,8 @@ At step t+1:
 **Recommended**: INT4 KV cache on edge, INT8 on server.
 
 When the cache exceeds scratchpad SRAM, it spills to LPDDR. The goal is to keep it on-chip.
+
+**Sliding Window Attention**: For long sequences, only the most recent W tokens are kept in the KV cache, reducing memory from O(seq_len) to O(W). A typical window size is W = 4096. This is especially effective for ternary accelerators with limited SRAM: a 4096-token sliding window with INT4 precision requires only ~4 × 512 × 4096 × 0.5 bytes ≈ 4 MB for the KV cache (at n_kv_heads=4, d_head=128), fitting comfortably in on-chip memory even for batch size > 1.
 
 ---
 
@@ -273,6 +299,19 @@ This is important because:
 - K/V projection matrices are ~8× smaller
 - KV cache is ~8× smaller
 - Ternary weight savings on K/V projections are smaller (but still significant)
+
+### 6.6.1 Flash Attention Adaptation
+
+Flash Attention reduces the I/O cost of attention by tiling the softmax computation into blocks that fit in SRAM, avoiding materializing the full [seq_len × seq_len] attention matrix. The key idea is an online softmax update: as each tile of K/V is loaded, the running max and partial sum are updated incrementally.
+
+For ternary weights, the adaptation is straightforward:
+
+- **Q, K, V projections** use the standard ternary GEMM kernel (unchanged).
+- **Score computation** (Q @ Kᵀ) is FP16 regardless of weight format — Flash Attention tiles this identically.
+- **Online softmax update** is slightly modified: since the non-zero weight pattern in Q/K projections can make some score blocks sparser, the running max update can skip all-zero blocks, saving a small number of FP16 comparisons.
+- **I/O complexity improvement remains**: The reduction from O(seq_len²) to O(seq_len² / M) in HBM-to-SRAM traffic is preserved, where M is the SRAM size. For a ternary accelerator with 8 MB SRAM, this means ~8× fewer DRAM reads for the attention matrix on a 2048-token sequence.
+
+The main benefit on a ternary accelerator is that the smaller KV cache (thanks to ternary weight compression) means more of the attention tiles fit in SRAM simultaneously, effectively increasing the tile size and further reducing I/O.
 
 ---
 
@@ -424,6 +463,8 @@ Decode throughput: ~20,000 tokens/s
 | Power | 400W | ~5W |
 | Tokens per joule (decode) | 75 | 4,000 |
 
+**Multi-chip scaling**: For 7B+ models whose ternary weights exceed a single chip's SRAM capacity, weights can be split across multiple ternary accelerator chips connected via a high-speed interconnect (e.g., UCIe or a proprietary mesh). Each chip holds a subset of layers or a partition of the weight tensor. The activation vector is broadcast to all chips, and partial results are reduced (summed) across chips. With a 64 GB/s interconnect, the all-reduce for a 4096-element FP16 vector adds only ~1 µs of latency per layer — negligible compared to the GEMM compute time. This approach scales to 13B, 70B, and beyond by adding more chips.
+
 ---
 
 ## 6.10 Batch Processing
@@ -479,3 +520,29 @@ With optimization and shared activation reuse: ~5-10 W
 | Activation memory for batch > 1 | Fuse operations to reduce intermediate storage |
 | Scale factor multiply latency | Fuse scale into bias, or use integer multiply-add |
 | Zero-sparsity not high enough | Train with stronger sparsity regularization |
+
+---
+
+## 6.13 Multi-Model Support
+
+The accelerator can efficiently switch between different models without reconfiguring the compute array. Since ternary weights are densely packed (10 trits per 16-bit word), model switching is purely a DMA transfer of weight data from external storage (e.g., flash or DRAM) into the on-chip SRAM.
+
+```
+Model switch procedure:
+  1. Save current context (KV cache, activations) to LPDDR
+  2. DMA new model weights from storage → SRAM
+  3. Restore new model's context from LPDDR
+  4. Resume inference
+```
+
+With 8 MB SRAM and a 200 MB ternary model (e.g., a 1B-parameter model at ~1.585 bits/parameter):
+
+```
+Load time = Model size / DMA bandwidth
+           = 200 MB / 64 GB/s
+           ≈ 25 ms
+```
+
+This is fast enough for interactive use cases (e.g., switching between a code model and a chat model). The DMA transfer can also be overlapped with computation: while the current model's last few layers are executing, the first layers of the next model can begin loading into a separate SRAM bank (double-buffered weight loading), reducing effective switch time to near zero for pipelined execution.
+
+For multi-tenant edge devices (e.g., a smart hub running both a voice assistant and a translation model), the SRAM can be partitioned: 6 MB for the active model and 2 MB as a staging area for the next model's weights, enabling sub-10 ms hot-swapping.

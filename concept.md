@@ -1,542 +1,411 @@
 # Balanced Ternary for AI Computing
 
-## Overview
+## What Is Balanced Ternary?
 
-Balanced ternary is a numeral system that uses three digits:
+Most computers use **binary** — everything is 0 or 1. Balanced ternary uses **three** states:
 
-| Value | Symbol |
-| ----- | ------ |
-| -1    | T      |
-| 0     | 0      |
-| +1    | 1      |
+| Value | Symbol | Meaning |
+| ----- | ------ | ------- |
+| -1    | T      | Negative |
+| 0     | 0      | Zero |
+| +1    | 1      | Positive |
 
-Unlike binary, balanced ternary naturally represents positive and negative values without requiring a separate sign bit.
+That's it. Three simple values. But this small change has profound implications for AI hardware.
 
-This property makes balanced ternary particularly attractive for AI acceleration because many machine learning models can be quantized into three states:
+### Why Three States Matter
 
-```text
-{-1, 0, +1}
+In a binary neural network, every weight is either `-1` or `+1`. There's no option for "unimportant." Every single weight must participate in computation — even the ones that are nearly zero.
+
+Balanced ternary adds the **zero** state, which acts as a built-in pruning mechanism:
+
 ```
+Binary:   {-1, +1}     → every weight contributes
+Ternary:  {-1, 0, +1}  → near-zero weights become "skip"
+```
+
+The zero state means:
+- **No computation**: skip the multiply-accumulate entirely
+- **No energy**: clock-gate that processing element
+- **No storage**: sparse formats can omit zeros
+
+This is the single most important advantage of balanced ternary: **it turns pruning into a natural byproduct of quantization**.
 
 ---
 
-# Why AI Is a Good Fit
+## Why AI Is a Good Fit
 
-Modern neural networks primarily perform:
+### The Problem: Multiplication Is Expensive
 
-```math
-y = Σ(wᵢ × xᵢ)
+Neural networks are mostly one operation:
+
+```
+output = weight₁ × input₁ + weight₂ × input₂ + ... + weightₙ × inputₙ
 ```
 
-Where:
+This is called **Multiply-Accumulate (MAC)**. In a GPU, MAC units dominate the chip area and power consumption:
 
-* `xᵢ` = activation
-* `wᵢ` = weight
+| Precision | Multiplier Area | Power per MAC |
+|-----------|----------------|---------------|
+| FP32      | 100%           | ~1.0 pJ       |
+| FP16      | ~25%           | ~0.3 pJ       |
+| INT8      | ~6%            | ~0.2 pJ       |
+| Ternary   | **0%**         | **~0.05 pJ**  |
 
-Most hardware resources in GPUs and AI accelerators are dedicated to:
+Ternary eliminates the multiplier entirely. Instead of multiplying, the hardware just **selects**: add, subtract, or skip.
 
-```text
-Multiply + Accumulate (MAC)
+### The Insight: Multiplication Becomes Selection
+
+With ternary weights, a normal multiplication `w × x` becomes:
+
+| Weight | Result | What Hardware Does |
+| ------ | ------ | ------------------ |
+| +1     | x      | Pass through (wire) |
+| 0      | 0      | Skip (clock gate) |
+| -1     | -x     | Negate (~4 transistors) |
+
+**No multiplier needed.** The entire MAC unit shrinks to a single adder with a mux.
+
+### Worked Example
+
+Say we have 4 inputs and 4 weights:
+
+```
+Inputs:   [4, 7, 2, 5]
+Weights:  [1, T, 0, 1]     (T means -1)
 ```
 
-operations.
+**Traditional hardware** computes:
+```
+4×1 + 7×(-1) + 2×0 + 5×1 = 4 - 7 + 0 + 5 = 2
+```
+That's 4 multiplications + 3 additions = 7 operations.
 
-Balanced ternary can significantly reduce the cost of multiplication.
+**Ternary hardware** computes:
+```
+  4      (pass x as-is)
+- 7      (negate x)
++ 0      (skip entirely)
++ 5      (pass x as-is)
+────
+  2
+```
+That's 2 additions + 1 negation + 1 skip = 4 operations, **zero multiplications**.
+
+At 75% sparsity (common in trained models), ternary does **4× fewer operations** than dense computation.
 
 ---
 
-# Ternary Neural Networks (TNN)
+## Storage: 20× Smaller Models
 
-Instead of storing arbitrary floating-point weights:
+A ternary weight carries `log₂(3) ≈ 1.585` bits of information, compared to 32 bits for FP32:
 
-```text
--2.347
-0.843
-4.921
+| Format | Bits/Weight | 1B Parameters |
+|--------|-------------|---------------|
+| FP32   | 32          | 4 GB          |
+| INT8   | 8           | 1 GB          |
+| Ternary| ~1.585      | ~200 MB       |
+
+A 200 MB model fits entirely in **on-chip SRAM** — no slow, energy-hungry DRAM access needed. This is transformative for edge devices.
+
+### Packing: 10 Trits in 16 Bits
+
+Because `3¹⁰ = 59,049` fits in `2¹⁶ = 65,536`, we can pack 10 ternary weights into a single 16-bit word with only ~10% waste:
+
+```
+16-bit word: [t₉ t₈ t₇ t₆ t₅ t₄ t₃ t₂ t₁ t₀]
+              ↑                   ↑
+         first weight       last weight
 ```
 
-weights are constrained to:
+Multiple packing options exist depending on the use case:
 
-```text
--1
-0
-+1
-```
-
-which map directly to balanced ternary digits.
-
-| Weight | Trit |
-| ------ | ---- |
-| -1     | T    |
-| 0      | 0    |
-| +1     | 1    |
+| Scheme | Trits | Bits | Efficiency | Best For |
+|--------|-------|------|------------|----------|
+| 5→8    | 5     | 8    | 95%        | Simple hardware decode |
+| 10→16  | 10    | 16   | 90%        | Maximum storage density |
+| 20→32  | 20    | 32   | 81%        | SIMD-friendly access |
 
 ---
 
-# Multiplication Simplification
+## Sparsity: The Hidden Superpower
 
-A normal multiplication:
+Many trained neural networks have a large fraction of near-zero weights. In a binary network, these near-zero weights must be stored as either `-1` or `+1` — they still consume storage and computation.
 
-```math
-w × x
-```
+In a ternary network, they become `0` — and zeros are **free**:
 
-becomes:
+| Sparsity | Accuracy Impact | Compute Reduction |
+|----------|----------------|-------------------|
+| 0%       | Baseline       | 0%                |
+| 50%      | +1.1 PPL       | 2×                |
+| 75%      | +4.0 PPL       | 4×                |
+| 90%      | +8.5 PPL       | 10×               |
 
-| Weight | Result |
-| ------ | ------ |
-| -1     | -x     |
-| 0      | 0      |
-| +1     | x      |
+The sweet spot for most applications is **50-75% sparsity**, where accuracy loss is modest but compute savings are dramatic.
 
-Therefore:
-
-```text
-Multiplier → Not Needed
-```
-
-Hardware only needs:
-
-```text
-Copy
-Negate
-Ignore
-```
-
-operations.
+**Key insight**: Ternary doesn't just quantize — it **combines quantization and pruning into a single step**. The zero trit is both a quantization level and a pruning decision.
 
 ---
 
-# Example
+## Scale Factors: Recovering Accuracy
 
-Inputs:
+Pure ternary (just `-1, 0, +1`) is too lossy for most models. The fix is a **per-channel scale factor** α:
 
-```text
-[4, 7, 2, 5]
+```
+W_effective = α × W_ternary
 ```
 
-Weights:
+Each output channel gets its own FP16 scale factor. This recovers most of the accuracy loss with minimal overhead (~2% storage for typical layer dimensions).
 
-```text
-[1, T, 0, 1]
-```
-
-Computation:
-
-```text
-4
--7
-0
-+5
-```
-
-Result:
-
-```text
-2
-```
-
-Traditional hardware:
-
-```text
-4 multiplications
-3 additions
-```
-
-Ternary hardware:
-
-```text
-copy
-negate
-ignore
-copy
-add
-```
+Think of it like this: the ternary weight provides the **direction** (+1, 0, or -1), while the scale factor provides the **magnitude**. Together, they approximate the original FP32 weight much more accurately than either alone.
 
 ---
 
-# Storage Efficiency
+## Hardware Architecture
 
-## FP32
+A ternary AI accelerator looks like this:
 
-For a model with 1 billion parameters:
-
-```text
-32 bits × 1B
-= 4 GB
 ```
-
-## INT8
-
-```text
-8 bits × 1B
-= 1 GB
-```
-
-## Ternary
-
-A ternary weight contains:
-
-```math
-log₂(3) ≈ 1.585 bits
-```
-
-Storage requirement:
-
-```text
-≈ 200 MB
-```
-
-Potential reduction:
-
-```text
-4 GB → 200 MB
-```
-
-Approximately 20× smaller than FP32.
-
----
-
-# Balanced Ternary Packing
-
-Efficient packing is possible because:
-
-```math
-3¹⁰ = 59,049
-```
-
-and
-
-```math
-2¹⁶ = 65,536
-```
-
-Therefore:
-
-```text
-10 trits
-```
-
-fit into:
-
-```text
-16 bits
-```
-
-with relatively little waste.
-
-Possible storage format:
-
-```text
-16-bit word
- └─ contains 10 ternary weights
-```
-
----
-
-# Sparse Neural Networks
-
-The value `0` is extremely important.
-
-Many trained networks contain a large number of near-zero weights after pruning.
-
-Example:
-
-```text
-90% of weights ≈ 0
-```
-
-Binary networks:
-
-```text
-{-1, +1}
-```
-
-cannot represent "unimportant".
-
-Ternary networks:
-
-```text
-{-1, 0, +1}
-```
-
-can naturally encode sparsity.
-
-Advantages:
-
-* Better compression
-* Lower power consumption
-* Fewer computations
-* Better accuracy than binary networks at similar sizes
-
----
-
-# Hardware Architecture
-
-A conceptual ternary AI accelerator:
-
-```text
 ┌─────────────────────┐
-│ Host CPU            │
+│ Host CPU            │  ← Model loading, scheduling
 └──────────┬──────────┘
            │
            ▼
 ┌─────────────────────┐
-│ Model Loader        │
+│ Trit Decoder        │  ← Unpack 10 trits per 16-bit word
 └──────────┬──────────┘
            │
            ▼
 ┌─────────────────────┐
-│ Trit Decoder        │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Ternary Compute     │
+│ Ternary Compute     │  ← 128×128 array of add/sub/skip PEs
 │ Array               │
 └──────────┬──────────┘
            │
            ▼
 ┌─────────────────────┐
-│ Accumulator         │
+│ Accumulator         │  ← Apply per-channel scale factor
+│ + Scale Unit        │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ FP16 Compute Unit   │  ← Softmax, LayerNorm, attention scores
 └─────────────────────┘
 ```
 
-Each compute unit:
+Each processing element (PE) is dead simple:
 
-```text
-Weight = 1
- → pass x
-
-Weight = T
- → pass -x
-
-Weight = 0
- → disable lane
+```
+Weight = +1  →  pass activation through
+Weight = -1  →  negate activation
+Weight =  0  →  disable this lane (clock gating)
 ```
 
-No multiplier is required.
+No multiplier. No complex floating-point unit. Just an adder, an inverter, and a mux.
 
 ---
 
-# Differential Trit Encoding
+## Differential Encoding: Wire-Swap Negation
 
-Instead of storing trits as analog voltage levels:
+How do you physically represent three states on a chip? The elegant solution uses **two wires** per trit:
 
 | Trit | Wire A | Wire B |
-| ---- | ------ | ------ |
+|------|--------|--------|
 | T    | 0      | 1      |
 | 0    | 0      | 0      |
 | 1    | 1      | 0      |
 
-Benefits:
+**Negation is free**: to flip `T ↔ 1`, you just swap the two wires. No inverter needed.
 
-* Uses standard CMOS
-* Better noise immunity
-* No precision voltage thresholds
-* Negation becomes wire swapping
+**Zero detection is trivial**: `A=0, B=0` means zero — a single NOR gate enables clock gating.
 
-Example:
-
-```text
-T = 01
-0 = 00
-1 = 10
-```
-
-Negation:
-
-```text
-01 ↔ 10
-00 ↔ 00
-```
+This is fully digital CMOS — no analog voltage levels, no precision comparators, no noise sensitivity.
 
 ---
 
-# Hybrid Architecture
+## Hybrid Architecture: Best of Both Worlds
 
-Rather than replacing binary completely:
+Ternary doesn't replace everything. A practical accelerator uses the right tool for each job:
 
-```text
-ALU       → Ternary
-Registers → Ternary
-
-Cache     → Binary
-RAM       → Binary
-Storage   → Binary
+```
+Weights          → Ternary {-1, 0, +1}     (storage + GEMM)
+Activations      → INT8                    (cheap, good accuracy)
+Attention scores → FP16                    (needs exponent range)
+Softmax/LayerNorm→ FP16                    (numerically sensitive)
+Control logic    → Standard binary         (unchanged)
 ```
 
-Benefits:
-
-* Reuses existing memory technology
-* Minimizes hardware risk
-* Preserves software compatibility
+This hybrid approach means:
+- **90%+ of compute** (the GEMM) uses simple ternary add/sub/skip
+- **Numerically sensitive operations** (softmax, LayerNorm) keep FP16 precision
+- **Existing software** (PyTorch, ONNX) needs minimal changes
 
 ---
 
-# Memristor-Based Implementation
+## Why This Targets the Real Bottleneck
 
-Future devices may support ternary states directly.
+Modern LLM inference is **memory-bandwidth-bound**, not compute-bound. The GPU spends most of its time waiting for weights to arrive from off-chip memory.
 
-Potential technologies:
-
-* Memristors
-* Ferroelectric FETs (FeFET)
-* Floating-gate transistors
-* Carbon nanotube FETs (CNTFET)
-* Resonant tunneling devices
-
-Example state mapping:
-
-```text
-Negative Conductance → T
-Zero Conductance     → 0
-Positive Conductance → 1
 ```
+FP32 model:  4 GB × 20 tokens/s = 80 GB/s memory bandwidth needed
+Ternary:     200 MB × 20 tokens/s = 4 GB/s memory bandwidth needed
+```
+
+That's a **20× reduction** in memory traffic. The weights fit in on-chip SRAM, eliminating the most energy-hungry part of inference.
+
+### Energy Breakdown
+
+| Component | FP32 | Ternary | What Changed |
+|-----------|------|---------|--------------|
+| Weight memory access | 60% | ~0% | Fits in SRAM |
+| Compute (MAC) | 25% | ~8% | No multipliers |
+| Activation movement | 10% | ~10% | Same |
+| Other | 5% | ~2% | Simpler control |
 
 ---
 
-# In-Memory Computing
+## Running on Today's Hardware
 
-A memristor crossbar could perform matrix multiplication physically.
+Purpose-built ternary accelerators don't exist yet. But you can deploy ternary models on current hardware:
 
-Instead of:
+- **GPUs**: Unpack ternary → INT8 at runtime, use tensor cores (CUDA kernel provided)
+- **CPUs**: Use AMX/NEON dot-product instructions on unpacked weights
+- **NPUs**: Convert to INT8, leverage existing matrix units
+- **FPGAs**: Implement native add/sub/skip datapath (Verilog decoder provided)
 
-```text
-Digital multiplication
-```
+Each platform recovers the **storage and bandwidth advantage** (20× smaller weights) even if the compute simplification requires emulation.
 
-the computation is performed through:
-
-* Ohm's Law
-* Kirchhoff's Current Law
-
-Conceptually:
-
-```text
-Physics computes the matrix multiplication
-```
-
-Advantages:
-
-* Extremely low power
-* Massive parallelism
-* Reduced memory movement
-
-Relevant research areas:
-
-* Neuromorphic Computing
-* Analog AI
-* In-Memory Computing
+See [Running Ternary Models on Current Hardware](details/11-current-hardware-gpu-cpu-npu.md) for platform-specific kernels and performance estimates.
 
 ---
 
-# LLM Accelerator Architecture
+## Custom Accelerator Design
 
-A balanced ternary LLM accelerator could use:
+For maximum efficiency, a purpose-built ternary ASIC achieves:
 
-## Weight Format
+| Metric | Value |
+|--------|-------|
+| Process | 7nm |
+| Die area | 25 mm² |
+| Weight SRAM | 8 MB (fits 1B ternary parameters) |
+| Compute | 128×128 add/skip array @ 1 GHz |
+| Decode throughput | 10 trits/cycle per column |
+| Power | ~4W |
+| Decode throughput | ~20K tokens/s (1B model) |
 
-```text
-{-1, 0, +1}
-```
-
-stored directly as trits.
-
-## Activations
-
-```text
-INT4
-```
-
-or
-
-```text
-INT8
-```
-
-## Attention Layers
-
-Executed using ternary matrix multiplication engines.
-
-Potential benefits:
-
-* Reduced model size
-* Reduced memory bandwidth
-* Lower power consumption
-* Higher throughput
-* Simpler arithmetic units
+See [Custom Accelerator Design](details/12-custom-ternary-accelerator-design.md) for the full architecture specification including PE design, memory hierarchy, instruction set, and compiler pipeline.
 
 ---
 
-# Why This Targets the Real Bottleneck
+## Converting Models to Ternary
 
-Modern LLM inference is often limited by:
+The conversion pipeline has two paths:
 
-```text
-Memory bandwidth
+### Quick Path: Post-Training Quantization (PTQ)
 ```
-
-rather than raw arithmetic performance.
-
-Each inference step requires moving enormous quantities of weights.
-
-Ternary models directly reduce:
-
-```text
-Weight storage
-Memory traffic
-Cache pressure
-Energy consumption
+FP32 model → calibrate scales → ternarize → validate
 ```
+Takes minutes. Loses 2-5% accuracy. No retraining needed.
+
+### Quality Path: Quantization-Aware Training (QAT)
+```
+FP32 model → insert ternary layers → fine-tune with STE → export
+```
+Takes hours/days. Loses 1-3% accuracy. Requires retraining.
+
+A complete Elixir conversion toolkit is provided in [`tools/ternary_converter/`](tools/ternary_converter/) with:
+- `convert` — Convert weights to `.tbin` binary format
+- `demo` — Full pipeline demo with synthetic weights
+- `info` — Inspect `.tbin` models (sparsity, compression, layer stats)
+- `validate` — Round-trip verification and inference testing
+
+See [Model Conversion Guide](details/13-model-conversion-guide.md) for detailed pipelines, model-specific recipes (LLaMA, GPT-2, BERT, ViT), and the Elixir API.
 
 ---
 
-# Commercially Realistic Product
+## Comparison with Other Approaches
 
-Instead of building a general-purpose ternary CPU:
+| Approach | Bits/Weight | Multiplier? | Sparsity? | Accuracy | Hardware |
+|----------|-------------|-------------|-----------|----------|----------|
+| **Ternary** | **1.585** | **No** | **Natural** | **-1-3%** | Custom |
+| Binary | 1 | No | No | -5-10% | FPGA |
+| INT8 | 8 | Yes | Structured | -0.5% | GPU/NPU |
+| INT4 | 4 | Yes | No | -1% | GPU |
+| FP8 | 8 | Yes | No | -0.1% | GPU |
+| FP32 | 32 | Yes | No | Baseline | GPU |
 
-## Build
+**Ternary's unique combination**: lowest bit width + no multiplier + natural sparsity. The trade-off is requiring custom hardware.
 
-Ternary Transformer Inference Accelerator
-
-### Components
-
-* ARM or RISC-V host CPU
-* Ternary weight storage
-* Ternary matrix multiplication engine
-* Trit-packed SRAM
-* Model quantization compiler
-
-### Target Markets
-
-* Smartphones
-* Edge AI devices
-* Drones
-* Robotics
-* IoT systems
-* On-device LLM inference
+See [Detailed Comparison](details/10-comparison.md) for comprehensive pros/cons against each alternative.
 
 ---
 
-# Long-Term Vision
+## Target Markets
 
-Balanced ternary failed historically because semiconductor technology was optimized for binary switching.
+| Market | Model Size | Power Budget | Key Metric |
+|--------|-----------|-------------|------------|
+| Smartphones | 100M-1B | <3W | On-device LLM |
+| Edge AI | 100M-7B | <5W | Real-time inference |
+| Drones | 50M-500M | <2W | Weight + power |
+| Robotics | 100M-1B | <5W | Latency |
+| IoT | 10M-100M | <1W | Cost + power |
 
-However, AI workloads differ from traditional computing:
+---
 
-* Approximate computation is acceptable
-* Sparse representations are valuable
-* Memory bandwidth dominates cost
-* Multiplication is expensive
+## Long-Term Vision
 
-These characteristics align unusually well with balanced ternary arithmetic.
+Balanced ternary computing was explored as early as the 1950s (the Soviet Setun computer) but failed to gain adoption because binary switching was simpler and no workload demanded three states.
 
-Rather than replacing binary computing, balanced ternary may find success as a specialized AI acceleration technology that leverages:
+**AI changes this calculus.** Neural networks are:
+- **Error-tolerant** — approximate computation is fine
+- **Memory-bandwidth-bound** — ternary reduces weight size 20×
+- **Multiplication-heavy** — ternary eliminates multipliers
+- **Naturally sparse** — ternary's zero state captures this for free
 
-```text
-{-1, 0, +1}
+Rather than replacing binary computing, balanced ternary may find success as a **specialized AI acceleration technology** — the right tool for the most important workload of the coming decade.
+
+### Research Trajectory
+
+```
+Phase 0: Foundation        → Software simulation, literature review
+Phase 1: Small Models      → ResNet, BERT validation
+Phase 2: Transformer       → GPT-2, LLaMA 1B validation
+Phase 3: Sparsity          → 75%+ sparsity training
+Phase 4: HW Simulation     → Cycle-accurate simulator
+Phase 5: FPGA Prototype    → Working hardware demo
+Phase 6: ASIC Pathfinding  → Tape-out specifications
 ```
 
-representations for efficient storage, computation, and energy usage.
+See [Research Roadmap](details/08-research-roadmap.md) for the detailed 48-week plan.
 
+---
+
+## Document Structure
+
+### Getting Started
+- **[`concept.md`](concept.md)** (this file) — High-level overview and motivation
+
+### Deep Dives
+| Document | Content |
+|----------|---------|
+| [`01-architecture-overview`](details/01-architecture-overview.md) | Layer types, data flow, hybrid precision, scaling strategies |
+| [`02-weight-quantization`](details/02-weight-quantization.md) | Quantizer design, threshold selection, per-channel scaling, QAT |
+| [`03-training`](details/03-training.md) | Training pipeline, STE variants, distillation, distributed training |
+| [`04-storage-format`](details/04-storage-format.md) | Packing schemes, sparse formats, decoder design, bandwidth calc |
+| [`05-hardware-architecture`](details/05-hardware-architecture.md) | PE design, systolic array, memory hierarchy, ISA, verification |
+| [`06-llm-inference-engine`](details/06-llm-inference-engine.md) | Transformer mapping, KV cache, throughput analysis, energy |
+| [`07-accuracy-analysis`](details/07-accuracy-analysis.md) | Benchmarks, sensitivity analysis, ablation studies |
+| [`08-research-roadmap`](details/08-research-roadmap.md) | 48-week plan, resources, risks, publication strategy |
+| [`09-differential-encoding`](details/09-differential-encoding.md) | Two-wire encoding, CMOS compatibility, DFT |
+| [`10-comparison`](details/10-comparison.md) | Detailed comparison with BNN, INT8, INT4, FP8, pruning |
+| [`11-current-hardware`](details/11-current-hardware-gpu-cpu-npu.md) | GPU/CPU/NPU/FPGA deployment today |
+| [`12-custom-accelerator`](details/12-custom-ternary-accelerator-design.md) | Full ASIC architecture specification |
+| [`13-model-conversion`](details/13-model-conversion-guide.md) | PTQ/QAT pipelines, recipes, Elixir toolchain |
+| [`14-ternary-llm-feasibility`](details/14-ternary-llm-feasibility.md) | Feasibility at trillion-parameter scale, MoE, cost analysis |
+| [`15-ternary-vision`](details/15-ternary-vision-computing.md) | Vision computing: CNNs, ViT, detection, segmentation |
+
+### Code & Tools
+| Path | Content |
+|------|---------|
+| [`tools/ternary_converter/`](tools/ternary_converter/) | Full Elixir app: convert, demo, info, validate |
+| [`examples/ternary_pure/`](examples/ternary_pure/) | Pure Elixir quantization + packing demo |
+| [`examples/ternary_nx/`](examples/ternary_nx/) | Nx tensor-based quantization + GEMM demo |

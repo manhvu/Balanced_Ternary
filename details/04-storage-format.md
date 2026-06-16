@@ -101,6 +101,16 @@ A 16-bit to 10-trit decoder can be built with:
 - Small lookup table (base-3 digit extraction)
 - Combinational logic, ~50-100 gates per output
 
+### 4.2.1 Endianness and Bit Ordering
+
+Trits should be packed in **little-endian order** (least significant trit first). The encoding formula places `t₀` in the least-significant position:
+
+```
+V = t₀ × 3⁰ + t₁ × 3¹ + … + t₉ × 3⁹
+```
+
+This ordering simplifies the hardware decoder because repeated division by 3 extracts digits starting from the least-significant trit. The first trit extracted (`t₀`) maps directly to the first processing element (PE) in the systolic array, eliminating a reversal step.
+
 ---
 
 ## 4.3 Packing Scheme: 5 Trits in 8 Bits
@@ -147,7 +157,9 @@ Advantages:
 |--------|-------|------|------------|-----------|-------------|
 | 10→16  | 10    | 16   | 99%        | Half-word | Medium      |
 | 5→8    | 5     | 8    | 95%        | Byte      | Low         |
+| 3→5    | 3     | 5    | 95%        | Nibble+   | Low         |
 | 20→32  | 20    | 32   | 99%        | Word      | Higher      |
+| 13→21  | 13    | 21   | 99%        | N/A       | Medium      |
 | 2→4    | 2     | 4    | 79%        | Nibble    | Trivial     |
 | Naive 2b| 1    | 2    | 79%        | Any       | None        |
 
@@ -217,6 +229,27 @@ Block metadata:
 
 This gives better hardware efficiency than fully unstructured sparsity.
 
+### 4.7.1 Run-Length Encoding for Ternary
+
+For very sparse layers (>90% zeros), **run-length encoding (RLE)** can be more compact than index+sign. Instead of storing individual positions, encode runs of consecutive zeros as a single count value:
+
+```
+Encoding scheme:
+  Zero run:  <0><count-1>     — count stored in unary or gamma coding
+  Non-zero:  <1><sign><index>  — sign bit + position of next non-zero
+```
+
+**Comparison of sparse formats at 95% sparsity:**
+
+| Format | Bits per trit | Decode complexity | Best for |
+|--------|--------------|-------------------|----------|
+| Dense (10→16) | 1.60 | Trivial | < 80% sparse |
+| Index+sign | 0.65 | Low (sequential scan) | 80–95% sparse |
+| RLE | ~0.40 | Medium (counter-based) | > 90% sparse |
+| Block sparse | 0.80 | Low (bitmask lookup) | Structured sparsity |
+
+RLE excels when zeros cluster in long runs (common in pruned attention layers). The decoder maintains a counter: on each cycle, if the counter is non-zero it emits a trit `0` and decrements; otherwise it reads the next encoded token. Hardware cost is a small counter + a state machine (~200 gates).
+
 ---
 
 ## 4.8 Hybrid Storage Design
@@ -256,6 +289,8 @@ Example sparse layer:
     [Format byte][Scale dim][FP16 scales...
      non-zero count][index array...][sign array...]
 ```
+
+**Format metadata overhead:** Each layer requires 1 byte for the format identifier + 2 bytes for the scale dimension + the scale data itself (N × 2 bytes for FP16). For a 32-layer model with per-channel scaling on typical dimensions, total metadata is approximately **130 KB** — negligible compared to the weight storage.
 
 ---
 
@@ -318,3 +353,39 @@ During a GEMM, stream packed data through a decoder that emits one row at a time
 | Software inference | 5→8 packing | Easy SIMD decode |
 | Small kernels (<64 weights) | 2-bit naive | No decode overhead |
 | SRAM buffer | 10→16 packing | Density, moderate decode |
+
+---
+
+## 4.12 Memory Bandwidth Calculation
+
+### Worked Example: 1B Parameter Model with 10→16 Packing
+
+**Storage required:**
+
+```
+1B parameters × 1.6 bits/trit (10→16 packing) = 1.6 Gb = 200 MB
+```
+
+**Transfer time at 1 GHz with a 256-bit bus:**
+
+```
+Bus bandwidth = 256 bits × 1 GHz = 32 GB/s
+Transfer time  = 200 MB / 32 GB/s
+              = 200M bytes / 32B per cycle
+              = 6.25M cycles
+              = 6.25 ms
+```
+
+**Comparison with FP32:**
+
+```
+1B parameters × 32 bits = 4 GB
+Transfer time = 4 GB / 32 GB/s = 125 ms
+```
+
+| Metric | Ternary (10→16) | FP32 | Ratio |
+|--------|-----------------|------|-------|
+| Storage | 200 MB | 4 GB | 20× |
+| Transfer time | 6.25 ms | 125 ms | 20× |
+
+The 20× reduction in memory bandwidth directly translates to faster weight loading and lower energy per inference, since DRAM access dominates energy consumption in LLM serving.

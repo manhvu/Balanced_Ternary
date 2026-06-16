@@ -50,23 +50,49 @@ defmodule TernaryMAC do
 end
 ```
 
+### 1.1.1 Why Not Ternary Activations?
+
+A natural question arises: if ternary weights save so much, why not also ternarize activations? The answer is that **ternary activations compound quantization errors across layers**, while keeping activations at INT8/INT4 preserves gradient flow and numerical stability.
+
+Each layer's output becomes the next layer's input. If both weights and activations are ternarized, the quantization error from layer *n* is fed directly into layer *n+1*, where it is amplified by the next ternarization step. After *L* layers, the accumulated error grows roughly as `O(L × ε)` where `ε` is the per-layer quantization noise — for deep networks (e.g., 96-layer LLMs), this becomes catastrophic.
+
+Keeping activations at INT8 or INT4 provides two key benefits:
+
+1. **Gradient flow during training**: Backpropagation requires smooth, differentiable activations. Ternary activations create a staircase function with zero gradient almost everywhere, making SGD ineffective. INT8 retains 256 levels — enough for gradient signals to propagate.
+2. **Numerical stability in attention**: Softmax and LayerNorm are sensitive to input precision. Ternary activations would collapse the attention distribution to 3 values, destroying the model's ability to focus selectively.
+
+| Aspect                | Ternary Activations | INT8 Activations |
+|-----------------------|---------------------|------------------|
+| Levels                | 3                   | 256              |
+| Per-layer error       | ~5-15%              | ~0.1-0.5%        |
+| Error accumulation    | Catastrophic (×L)   | Manageable       |
+| Gradient flow         | Broken              | Preserved        |
+| Softmax quality       | Severely degraded   | Near FP16        |
+| Training convergence  | Fails beyond ~4 layers | Converges normally |
+| Hardware cost         | Lowest              | Low (INT8 MAC)   |
+| Recommended           | ✗ No                | ✓ Yes             |
+
+**Bottom line**: Ternary is ideal for weights (static, trained to compensate) but harmful for activations (dynamic, error-amplifying). The hybrid approach — ternary weights with INT8/INT4 activations — captures 90% of the benefit with none of the stability problems.
+
 ---
 
 ## 1.2 Hybrid Precision Model
 
 A practical neural network cannot run entirely in ternary. A realistic design uses **hybrid precision**:
 
-| Component           | Precision          | Why                                     |
-|---------------------|--------------------|-----------------------------------------|
-| Weight matrices     | Ternary {-1,0,+1}  | Largest storage savings                 |
-| Scale factors       | FP16/BF16          | Per-channel correction for quantization |
-| Activations         | INT4 / INT8        | Cheaper than FP, good accuracy          |
-| Attention scores    | FP16               | Softmax requires exponential precision  |
-| Softmax             | FP16               | Numerical stability                     |
-| LayerNorm           | FP16/BF16          | Small tensors, high sensitivity         |
-| Residual connections| FP16/BF16          | Accumulation of many layers             |
-| KV cache            | INT4 / ternary     | Large memory consumer in LLMs           |
-| Embedding tables    | INT8 / FP16        | Sensitive to quantization               |
+| Component              | Precision          | Why                                        |
+|------------------------|--------------------|--------------------------------------------|
+| Weight matrices        | Ternary {-1,0,+1}  | Largest storage savings                    |
+| Scale factors          | FP16/BF16          | Per-channel correction for quantization    |
+| Activations            | INT4 / INT8        | Cheaper than FP, good accuracy             |
+| Attention scores       | FP16               | Softmax requires exponential precision     |
+| Softmax                | FP16               | Numerical stability                        |
+| LayerNorm              | FP16/BF16          | Small tensors, high sensitivity            |
+| Residual connections   | FP16/BF16          | Accumulation of many layers                |
+| KV cache               | INT4 / ternary     | Large memory consumer in LLMs              |
+| Embedding tables       | INT8 / FP16        | Sensitive to quantization                  |
+| Gradient accumulation  | FP32               | Training only; avoids precision loss over millions of small updates |
+| Router weights (MoE)   | FP16               | Sensitive to quantization; routing decisions require fine-grained precision |
 
 ---
 
@@ -189,6 +215,46 @@ All three projections can be ternary, giving 3× compression over FP32.
     └─────────────────────┘
 ```
 
+### 1.4.1 Pipeline Stages per Transformer Layer
+
+A well-designed ternary accelerator overlaps computation and memory transfers to hide latency. Below is a timing breakdown for a single transformer layer with hidden dimension 4096, sequence length 2048, running at 1 GHz.
+
+```
+Stage                     | Description                    | Est. Cycles | Overlaps With
+--------------------------|--------------------------------|-------------|--------------
+1. Weight fetch (HBM→SRAM)| Load packed ternary weights    | 2,000       | —
+2. Ternary GEMM (Q/K/V)   | Add/skip/subtract accumulation | 8,000       | Act fetch
+3. Activation fetch       | Load INT8 activations to PE    | 1,500       | GEMM
+4. FP16 Attention Score   | Q × Kᵀ in FP16                 | 4,000       | KV cache load
+5. FP16 Softmax           | Exponent + normalize           | 1,000       | —
+6. FP16 Attention Apply   | Score × V in FP16              | 2,000       | —
+7. Ternary GEMM (O proj)  | Output projection              | 2,000       | —
+8. FP16 Residual + LN     | Skip connection + normalize    | 500         | —
+9. Ternary GEMM (MLP up)  | Gate + up projections          | 4,000       | —
+10. FP16 Activation       | SiLU/GELU in FP16              | 500         | —
+11. Ternary GEMM (MLP dn) | Down projection                | 2,000       | —
+12. FP16 Residual         | Final skip connection          | 200         | Weight fetch (next layer)
+--------------------------|--------------------------------|-------------|--------------
+Total per layer           |                                | ~27,700     |
+Effective (with overlap)  |                                | ~18,000     |
+```
+
+```
+Timeline (cycles, not to scale):
+  0    2k   4k   6k   8k   10k  12k  14k  16k  18k
+  ├────┼────┼────┼────┼────┼────┼────┼────┼────┤
+  [Wt]                                         [Wt+1]
+  [====GEMM QKV===]
+       [Act]  [Attn]  [SM] [Attn] [O] [LN] [MLP] [Act] [MLP] [Res]
+  ◄─────────────── Layer N ──────────────────────►◄── N+1 ──►
+```
+
+Key observations:
+- **Ternary GEMM dominates** (~65% of non-overlapped time) but benefits most from the add/skip/subtract simplification — it runs 3-4× faster than an equivalent INT8 GEMM.
+- **FP16 attention** is the second bottleneck; overlapping it with weight fetches for the next layer hides ~20% of its latency.
+- **Memory transfers** (weight fetch, activation fetch) are hidden behind computation in steady-state execution, reducing effective cycles from ~27,700 to ~18,000 per layer.
+- **LayerNorm and residuals** are negligible (<5% of cycles) but must remain in FP16 for numerical stability.
+
 ---
 
 ## 1.5 Sparse Ternary Representation
@@ -246,6 +312,8 @@ Storage overhead of scales:
   → Overhead: ~2%
 ```
 
+> **Scale factor initialization**: Best practice is to initialize each channel's scale factor `αⱼ` from the L2 norm of that channel's full-precision weight vector *before* ternarization. Specifically, `αⱼ = ||W_fp[j, :]||₂ / sqrt(n)` where `n` is the channel width. This ensures the ternary weight matrix starts with the same per-channel energy as the original FP model, minimizing the initial accuracy drop. The scale factors are then fine-tuned during quantization-aware training. Models initialized this way typically recover within 0.5% of FP32 accuracy after 1-2 epochs of fine-tuning, compared to 2-3% loss with naive uniform initialization.
+
 ---
 
 ## 1.7 Edge vs Server Deployment
@@ -302,3 +370,55 @@ Advantage:  ternary reduces HBM bandwidth bottleneck
 5. **Approximate computation is acceptable** — neural networks are naturally error-tolerant
 6. **Quantization-aware training** — required for good accuracy
 7. **Hybrid precision** — use the right tool for each operation
+
+---
+
+## 1.10 Software Stack Overview
+
+Deploying a ternary model requires a full compiler pipeline that transforms a standard PyTorch model into packed binary code for the accelerator:
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
+│  PyTorch      │     │   ONNX       │     │  Ternary          │
+│  Model        │────▶│   Export     │────▶│  Quantizer        │
+│  (FP32/BF16)  │     │   (.onnx)    │     │  (calibration +   │
+│               │     │              │     │   ternarization)  │
+└──────────────┘     └──────────────┘     └────────┬─────────┘
+                                                    │
+                                                    ▼
+┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
+│  Accelerator │     │  Accelerator │     │  Packed Binary    │
+│  Runtime     │◀────│  Driver      │◀────│  (.tbin)          │
+│  (inference) │     │  (load +     │     │  (2-bit trits +   │
+│              │     │   schedule)  │     │   FP16 scales)    │
+└──────────────┘     └──────────────┘     └──────────────────┘
+```
+
+### Stage 1: PyTorch Model
+The starting point is a standard PyTorch model in FP32 or BF16. No special annotations are required — the quantizer handles conversion automatically.
+
+### Stage 2: ONNX Export
+The model is exported to ONNX format, producing a portable graph representation. This decouples the quantization toolchain from the training framework and allows the same quantizer to serve models from JAX, TensorFlow, or other frontends.
+
+### Stage 3: Ternary Quantizer
+The quantizer performs three operations:
+1. **Calibration**: Runs a small representative dataset (typically 100-500 samples) through the ONNX graph to collect activation statistics (min/max, percentiles) and determine optimal per-channel scale factors.
+2. **Ternarization**: Converts each weight tensor to `{-1, 0, +1}` using the learned threshold `Δⱼ = αⱼ × threshold_factor`. Weights below the threshold become 0 (sparsity), others become ±1.
+3. **Scale factor initialization**: Computes `αⱼ = ||W_fp[j, :]||₂ / sqrt(n)` per channel (see §1.6) and stores them as FP16 alongside the ternary weights.
+
+### Stage 4: Packed Binary (`.tbin`)
+The ternary weights are packed into a dense binary format:
+- **Ternary data**: 2 bits per trit (encoding `-1 → 0b00`, `0 → 0b01`, `+1 → 0b10`; `0b11` unused), packed into 64-bit words (32 trits per word).
+- **Scale factors**: FP16 array, one per output channel, stored in a separate header section.
+- **Metadata**: Layer dimensions, sparsity masks, pipeline scheduling hints.
+
+For a 1B-parameter model, the `.tbin` file is ~200 MB (weights) + ~4 MB (scales) + negligible metadata.
+
+### Stage 5: Accelerator Runtime
+The runtime driver loads the `.tbin` into accelerator memory, configures the PE array, and executes the inference schedule:
+1. Fetches packed weights from HBM into on-chip SRAM.
+2. Unpacks trits on-the-fly in the PE array.
+3. Executes the ternary GEMM pipeline (§1.4.1) with overlapping FP16 attention stages.
+4. Streams results back to host memory.
+
+The runtime also handles dynamic shapes (variable sequence lengths) by adjusting the GEMM tiling parameters without recompilation.

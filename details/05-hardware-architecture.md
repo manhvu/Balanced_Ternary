@@ -161,6 +161,31 @@ This can be exploited by:
 2. **Operand forwarding**: propagate x to next PE in one cycle
 3. **Systolic stall reduction**: unused slots allow other data to advance
 
+### 5.2.1 PE Area Estimate
+
+A rough gate-level area estimate for one processing element:
+
+| Component | Gates | Notes |
+|-----------|-------|-------|
+| INT8 add/sub (mux-selected) | ~200 | 8-bit adder + subtractor + result mux |
+| Zero-skip mux | ~20 | 2:1 mux to forward or hold activation |
+| 32-bit accumulator | ~500 | 32-bit register + adder |
+| **Total per PE** | **~720** | |
+
+For a 128×128 systolic array:
+
+```
+16,384 PEs × 720 gates = ~11.8M gates
+```
+
+At 7nm, standard cell density is roughly 50M gates/mm², so:
+
+```
+11.8M gates ÷ 50M gates/mm² ≈ 0.24 mm² (core PE array)
+```
+
+Including decoder logic, accumulator pipeline, and routing overhead (~2×), the total GEMM array area is approximately **0.5 mm²** at 7nm.
+
 ---
 
 ## 5.3 Trit Decoder Unit
@@ -254,6 +279,15 @@ A small FP16 systolic array (e.g., 32×32) handles attention scores. This is muc
 - Attention score computation is O(n²) for sequence length n
 - Ternary GEMM is O(d_model²) for model dimension
 - d_model >> n_sequence for typical edge LLM inference
+
+### FP16 Approximation Note
+
+For softmax, the `exp` function can be approximated with either:
+
+- **Piecewise linear (PWL)**: 8–16 linear segments over the input range, implemented with a small multiplexer and multiplier.
+- **Lookup table (LUT)**: 256-entry table with linear interpolation between entries.
+
+Both approaches achieve **< 0.1% accuracy loss** on standard LLM benchmarks while avoiding the area and latency cost of a full FP16 transcendental unit. The LUT approach is preferred for its deterministic latency (~2 cycles) and small area (~0.01 mm² at 7nm).
 
 ---
 
@@ -354,6 +388,25 @@ Compare with INT8:
 Energy saving: ~28% per layer (plus memory bandwidth savings)
 ```
 
+### 5.8.1 Thermal Design
+
+At a 5 W power envelope on a 10 mm × 10 mm die:
+
+```
+Power density = 5 W / (10 mm × 10 mm)
+              = 5 W / 100 mm²
+              = 50 W/cm²
+```
+
+This is **manageable with a standard heat spreader** (copper or aluminum) and passive airflow. For reference:
+
+| Device | Power | Die Area | Power Density |
+|--------|-------|----------|---------------|
+| This accelerator | 5 W | 100 mm² | **50 W/cm²** |
+| NVIDIA A100 GPU | 400 W | 800 mm² | **500 W/cm²** |
+
+The GPU's 10× higher power density requires active cooling (fans, heatsinks, or liquid cooling), while the ternary accelerator can operate with a simple passive spreader — a critical advantage for edge and embedded deployments.
+
 ---
 
 ## 5.9 ASIC Implementation Parameters
@@ -372,6 +425,10 @@ Energy saving: ~28% per layer (plus memory bandwidth savings)
 | Power envelope | 2–10 W | Edge device target |
 | TOPS (ternary) | 128×128×1 GHz = 16 TOP/s | Add/sub operations |
 | Effective TOPS (75% sparse) | 4 TOP/s effective | Zero skip accounted |
+| Die area estimate | ~25 mm² at 7nm | GEMM + FP16 + SRAM + IO |
+| SRAM area | ~15 mm² | 12 MB total (8 MB weight + 4 MB scratchpad) |
+| Logic area | ~10 mm² | PE array, decoders, FP16 unit, controllers |
+| Cost estimate | ~$5 | At 7nm in volume (100K+ units) |
 
 ---
 
@@ -431,3 +488,17 @@ A transformer layer is compiled into a sequence of ~20-30 instructions.
 | Model fit (1B) | Many copies | Fits in SRAM |
 | Deployment | Server rack | Edge device |
 | Cost | $10,000+ | $50–200 (estimated) |
+
+---
+
+## 5.13 Verification Strategy
+
+Verifying the ternary accelerator requires a multi-level approach:
+
+1. **Unit tests for each module**: Individual testbenches for the PE, decoder, accumulator, FP16 unit, and controller. Directed tests cover corner cases (all zeros, all ±1, overflow). Coverage target: >95% line coverage, >90% toggle coverage.
+
+2. **Co-simulation with PyTorch golden model**: Run the same model layers on the RTL simulator (e.g., Verilator) and PyTorch with identical weights and inputs. Compare outputs element-wise with a tolerance of ±1 LSB in INT8 / FP16. This catches integration-level bugs that unit tests miss.
+
+3. **Formal verification of decoder**: The trit decoder is safety-critical — a decoding error corrupts all downstream computation. Use formal property checking (e.g., Symbiyosys / Yosys) to prove that every valid packed word maps to the correct trit sequence, and that invalid inputs are handled (capped or flagged).
+
+4. **FPGA emulation before tape-out**: Map the full accelerator to an FPGA prototyping board (e.g., Xilinx Alveo or Zynq) and run end-to-end inference on real LLM workloads. This validates timing, power, and functional correctness at near-real-time speeds before committing to silicon. FPGA results feed back into RTL fixes and microarchitecture tuning.
