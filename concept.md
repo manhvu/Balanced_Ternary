@@ -403,6 +403,7 @@ See [Research Roadmap](details/08-research-roadmap.md) for the detailed 48-week 
 | [`14-ternary-llm-feasibility`](details/14-ternary-llm-feasibility.md) | Feasibility at trillion-parameter scale, MoE, cost analysis |
 | [`15-ternary-vision`](details/15-ternary-vision-computing.md) | Vision computing: CNNs, ViT, detection, segmentation |
 | [`16-fpga-experiment`](details/16-fpga-experiment-guide.md) | FPGA experiment guide: board selection, RTL design, benchmarking |
+| [`17-asic-implementation`](details/17-asic-implementation-guide.md) | ASIC implementation guide: RTL design, physical design, DFT, manufacturing |
 
 ### Code & Tools
 | Path | Content |

@@ -60,6 +60,7 @@ The zero trit is the key advantage: it encodes sparsity directly, turning near-z
 | [`details/14-ternary-llm-feasibility.md`](details/14-ternary-llm-feasibility.md) | Ternary for trillion-parameter LLMs: scaling laws, MoE, cost analysis |
 | [`details/15-ternary-vision-computing.md`](details/15-ternary-vision-computing.md) | Ternary for vision: CNNs, ViT, detection, segmentation, edge deployment |
 | [`details/16-fpga-experiment-guide.md`](details/16-fpga-experiment-guide.md) | FPGA experiment guide: board selection, RTL design, benchmarking |
+| [`details/17-asic-implementation-guide.md`](details/17-asic-implementation-guide.md) | ASIC implementation guide: RTL design, physical design, DFT, manufacturing |
 
 ### Comparison & Roadmap
 
