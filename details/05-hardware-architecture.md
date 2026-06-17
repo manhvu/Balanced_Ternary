@@ -186,6 +186,8 @@ At 7nm, standard cell density is roughly 50M gates/mm², so:
 
 Including decoder logic, accumulator pipeline, and routing overhead (~2×), the total GEMM array area is approximately **0.5 mm²** at 7nm.
 
+> For detailed PE design including clock gating, pipeline stages, and layout, see §12.3 of [12-custom-ternary-accelerator-design.md](12-custom-ternary-accelerator-design.md).
+
 ---
 
 ## 5.3 Trit Decoder Unit
@@ -430,6 +432,8 @@ The GPU's 10× higher power density requires active cooling (fans, heatsinks, or
 | Logic area | ~10 mm² | PE array, decoders, FP16 unit, controllers |
 | Cost estimate | ~$5 | At 7nm in volume (100K+ units) |
 
+> For detailed physical design, power breakdown, and die floorplan, see §12.8 of [12-custom-ternary-accelerator-design.md](12-custom-ternary-accelerator-design.md).
+
 ---
 
 ## 5.10 NUMA-Aware Tile Scheduling
@@ -484,7 +488,7 @@ A transformer layer is compiled into a sequence of ~20-30 instructions.
 | MAC unit | Full multiplier | Add/sub/skip |
 | Sparsity support | 2:4 structured | Natural (zero = skip) |
 | Power | 400 W | 5–10 W |
-| Memory | 80 GB HBM | 8 MB SRAM + LPDDR |
+| Memory | 128 GB HBM3e | 8 MB SRAM + LPDDR |
 | Model fit (1B) | Many copies | Fits in SRAM |
 | Deployment | Server rack | Edge device |
 | Cost | $10,000+ | $50–200 (estimated) |
@@ -502,3 +506,5 @@ Verifying the ternary accelerator requires a multi-level approach:
 3. **Formal verification of decoder**: The trit decoder is safety-critical — a decoding error corrupts all downstream computation. Use formal property checking (e.g., Symbiyosys / Yosys) to prove that every valid packed word maps to the correct trit sequence, and that invalid inputs are handled (capped or flagged).
 
 4. **FPGA emulation before tape-out**: Map the full accelerator to an FPGA prototyping board (e.g., Xilinx Alveo or Zynq) and run end-to-end inference on real LLM workloads. This validates timing, power, and functional correctness at near-real-time speeds before committing to silicon. FPGA results feed back into RTL fixes and microarchitecture tuning.
+
+> For the full verification hierarchy with co-simulation code, see §12.9 of [12-custom-ternary-accelerator-design.md](12-custom-ternary-accelerator-design.md).

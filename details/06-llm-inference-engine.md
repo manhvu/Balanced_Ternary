@@ -458,8 +458,8 @@ Decode throughput: ~20,000 tokens/s
 
 | Metric | GPU (A100) | Ternary Accelerator |
 |--------|-----------|---------------------|
-| Prefill throughput (2048 seq) | ~500K tok/s | ~120K tok/s |
-| Decode throughput (single) | ~30K tok/s | ~20K tok/s |
+| Prefill throughput (2048 seq) | ~1M tok/s | ~120K tok/s |
+| Decode throughput (single) | ~50K tok/s | ~20K tok/s |
 | Power | 400W | ~5W |
 | Tokens per joule (decode) | 75 | 4,000 |
 

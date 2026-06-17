@@ -246,26 +246,9 @@ If too low:
 
 ## 2.6 Quantization-Aware Training (QAT)
 
-During training, weights are stored in full precision but ternarized on-the-fly in the forward pass:
+QAT stores weights in full precision and ternarizes them on-the-fly during the forward pass. The key challenge is that ternarization is a discontinuous operation whose gradient is zero almost everywhere; this is solved with the **straight-through estimator (STE)**, which approximates the backward gradient as if the quantization step were the identity function, enabling gradient-based optimization of the shadow weights and scale factors.
 
-```
-Forward:  y = (α × T) · x
-          T = ternarize(W_shadow / α)
-
-Backward: ∂L/∂W_shadow ≈ ∂L/∂W_effective
-          (straight-through estimator)
-
-Update:   W_shadow ← W_shadow − lr × ∂L/∂W_shadow
-          α ← α − lr × ∂L/∂α
-```
-
-The straight-through estimator (STE) bypasses the derivative of the ternarization step, which is zero almost everywhere:
-
-```
-∂T/∂W_shadow ≈ 1  (STE approximation)
-```
-
-This allows gradient flow through the quantization step.
+> For detailed QAT implementation with Python and Elixir code, see §3.3 in [03-training.md](03-training.md).
 
 ---
 
@@ -311,6 +294,8 @@ A pragmatic approach:
 - Keep embedding in INT8 or FP16
 - Keep final layer in INT8 or FP16
 ```
+
+> For a detailed accuracy impact analysis of these choices, see [07-accuracy-analysis.md](07-accuracy-analysis.md).
 
 ### 2.8.1 Automatic Mixed-Precision Selection
 
@@ -452,6 +437,8 @@ Compression: ~16×
 ## 2.11 Quantization Error Analysis
 
 We derive the expected mean squared error (MSE) for ternary quantization of a Gaussian weight distribution. This provides a theoretical foundation for choosing `Δ` and predicting accuracy loss.
+
+**Note**: This analysis applies to both CNN and Transformer architectures. Recent work (BitNet a4.58, 2024) has shown that the optimal threshold `Δ*` is architecture-dependent, with Transformers preferring slightly larger thresholds than CNNs due to their different weight distributions.
 
 **Setup:** Let `w ~ N(0, σ²)` be a weight drawn from a zero-mean Gaussian. The ternary quantizer with threshold `Δ` and scale `α` produces:
 

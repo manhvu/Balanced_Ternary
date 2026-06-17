@@ -29,6 +29,8 @@ The baseline should be as good as possible. Any existing accuracy gap will worse
 
 ## 3.3 Phase 2: Quantization-Aware Training (QAT)
 
+> This section expands on the QAT overview in §2.6 of [02-weight-quantization.md](02-weight-quantization.md).
+
 ### Forward Pass (Inference)
 
 ```
@@ -390,34 +392,17 @@ Latency ≈ (effective_MACs × compute_time)
 ```
 Software stack:
 
-PyTorch          → training framework
-TorchDistrib     → distributed training
+PyTorch 2.x      → training framework (with torch.compile)
+TorchDistrib     → distributed training (FSDP/DeepSpeed)
 Custom QAT       → ternary quantization layers
 Triton kernels   → ternary GEMM simulation
 HuggingFace      → model loading and tokenizer
+WandB            → experiment tracking
 ```
 
 ### Minimum Viable Training Script
 
-```python
-class TernaryLinear(nn.Module):
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.W_shadow = nn.Parameter(torch.randn(out_features, in_features) * 0.01)
-        self.scale = nn.Parameter(torch.ones(out_features))
-        self.delta = 0.5
-
-    def forward(self, x):
-        W_norm = self.W_shadow / self.scale.unsqueeze(1)
-        T = torch.where(W_norm > self.delta, 1.0,
-            torch.where(W_norm < -self.delta, -1.0, 0.0))
-
-        # Apply STE
-        W_effective = self.scale.unsqueeze(1) * T
-        W_effective = self.W_shadow + (W_effective - self.W_shadow).detach()
-
-        return F.linear(x, W_effective, self.bias)
-```
+> See the complete `TernaryLinear` implementation with quantization and STE in §11.6.1 of [11-current-hardware-gpu-cpu-npu.md](11-current-hardware-gpu-cpu-npu.md).
 
 ---
 

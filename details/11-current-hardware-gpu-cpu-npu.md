@@ -10,9 +10,18 @@ The fundamental challenge: **current hardware is designed for binary arithmetic*
 
 ## 11.2 GPU Deployment
 
-### 11.2.1 NVIDIA GPUs (Ampere, Ada Lovelace, Hopper)
+### 11.2.1 NVIDIA GPUs (Ampere → Hopper → Blackwell)
 
 NVIDIA GPUs are the most capable platform for ternary inference today, thanks to their mature software stack and high memory bandwidth.
+
+**Hardware Evolution:**
+
+| GPU | Year | INT8 TOPS | HBM BW | Notable |
+|-----|------|-----------|--------|--------|
+| A100 (Ampere) | 2020 | 624 | 2.0 TB/s | First-gen tensor core INT8 |
+| H100 (Hopper) | 2022 | 3952 | 3.35 TB/s | FP8 transformer engine |
+| H200 (Hopper) | 2024 | 3952 | 4.8 TB/s | 141 GB HBM3e |
+| B100/B200 (Blackwell) | 2024 | 9000+ | 8.0 TB/s | FP4 support, 192 GB HBM3e |
 
 **Approach: Ternary Weights + INT8 Activations via cuBLAS/TensorRT**
 
@@ -65,31 +74,77 @@ __global__ void ternary_gemm_kernel(
 }
 ```
 
-**Performance Estimate (NVIDIA A100, 1B parameter model):**
+**Performance Estimates (1B parameter model, decode latency):**
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| Weight unpack (200 MB) | ~0.1 ms | Memory-bound |
-| INT8 GEMM (600 MB weights) | ~1.2 ms | Tensor cores @ 312 TOPS |
-| Scale + bias apply | ~0.05 ms | Element-wise |
-| **Total per layer** | **~1.4 ms** | |
-| **Total 32 layers** | **~45 ms** | |
+| GPU | Weight Unpack | INT8 GEMM | Total | Power | Efficiency |
+|-----|---------------|-----------|-------|-------|------------|
+| A100 | ~0.1 ms | ~1.2 ms | ~45 ms | 300W | 1.5 ms/J |
+| H100 | ~0.06 ms | ~0.4 ms | ~15 ms | 350W | 4.3 ms/J |
+| H200 | ~0.04 ms | ~0.3 ms | ~10 ms | 400W | 5.0 ms/J |
+| B200 | ~0.03 ms | ~0.15 ms | ~5 ms | 500W | 10 ms/J |
 
-Compare with FP16 on same hardware: ~30 ms (tensor cores @ 624 TOPS for FP16). The ternary unpack overhead adds ~50% latency but reduces memory footprint by 4×.
+Compare with FP16: A100 ~30 ms, H100 ~10 ms. The ternary unpack overhead adds ~50% latency on A100 but only ~10% on H100/B200 due to faster memory.
 
-### 11.2.2 AMD GPUs (RDNA 3, CDNA 2)
+**Triton kernel for fused unpack + GEMM (PyTorch 2.0+):**
 
-AMD GPUs support INT8 via ROCm/MIOpen but lack dedicated tensor cores for INT8 in consumer (RDNA) parts. CDNA 2 (Instinct MI200 series) has matrix cores similar to NVIDIA's.
+```python
+import triton
+import triton.language as tl
 
-**Approach:** Same unpack-then-GEMM strategy, but using ROCm's `rocBLAS` INT8 support. The unpack kernel would use HIP instead of CUDA.
+@triton.jit
+def ternary_gemm_kernel(
+    packed_weights, activations, scales, output,
+    M, N, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs_m = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    
+    # Load packed words (10 trits each)
+    packed_ptrs = packed_weights + offs_m * (N // 10) + offs_n // 10
+    word = tl.load(packed_ptrs)
+    
+    # Extract trit via base-3 digit
+    trit_idx = offs_n % 10
+    digit = (word // (3 ** trit_idx)) % 3
+    w = digit - 1  # 0→-1, 1→0, 2→+1
+    
+    # Load activation and compute add/sub/skip
+    act = tl.load(activations + offs_n)
+    acc = tl.sum(w * act, axis=0)
+    
+    # Apply scale
+    alpha = tl.load(scales + offs_m)
+    tl.store(output + offs_m, alpha * acc)
+```
 
-**Limitation:** AMD's INT8 throughput is typically 2-4× lower than NVIDIA's for the same power budget, making the ternary advantage less pronounced.
+### 11.2.2 AMD GPUs (RDNA 3/4, CDNA 3)
+
+AMD GPUs have improved INT8 support across generations:
+
+| GPU | Year | INT8 TOPS | HBM BW | Notable |
+|-----|------|-----------|--------|--------|
+| MI250X (CDNA 2) | 2021 | 383 | 3.2 TB/s | Matrix cores, ROCm |
+| MI300X (CDNA 3) | 2023 | 2610 | 5.3 TB/s | 192 GB HBM3, FP8 |
+| MI350 (CDNA 4) | 2025 | ~5000+ | 6.0 TB/s | FP4 support expected |
+| RX 7900 XTX (RDNA 3) | 2022 | 1230 | 960 GB/s | Consumer, limited INT8 |
+| RX 9070 XT (RDNA 4) | 2025 | ~2000 | 1.5 TB/s | Improved AI accelerators |
+
+**Approach:** Same unpack-then-GEMM strategy, using ROCm's `rocBLAS` INT8 GEMM or HIP kernels. The MI300X is competitive with H100 for ternary inference due to its 192 GB HBM3 capacity.
+
+**Key advantage for MI300X:** 192 GB HBM3 can hold a 7B ternary model entirely in memory (11 GB weights + scales), enabling single-device inference without model parallelism.
 
 ### 11.2.3 Mobile GPUs (ARM Mali, Qualcomm Adreno, Apple GPU)
 
-Mobile GPUs are memory-bandwidth-constrained (shared LPDDR), making ternary's bandwidth advantage highly relevant. However, they lack INT8 tensor cores in most cases.
+Mobile GPUs are memory-bandwidth-constrained (shared LPDDR), making ternary's bandwidth advantage highly relevant.
 
-**Approach:** Use GPU compute shaders (Vulkan/OpenCL) to implement the ternary add/sub/skip directly. Since mobile GPUs are scalar/SIMD rather than systolic, the multiplier elimination advantage is less impactful, but the 20× weight reduction means fewer memory accesses.
+| GPU | INT8 Support | BW | Best For |
+|-----|-------------|-----|----------|
+| Apple A17 Pro | Limited (ANE preferred) | 100 GB/s | iOS deployment |
+| Adreno 750 (SD 8 Gen 3) | Yes (via HVX) | 77 GB/s | Android flagship |
+| Mali-G720 (Dimensity 9300) | Partial | 68 GB/s | MediaTek devices |
+
+**Approach:** Use GPU compute shaders (Vulkan/OpenCL) to implement the ternary add/sub/skip directly. The 20× weight reduction means fewer memory accesses, which is the dominant cost on mobile.
 
 **Example (Vulkan compute shader):**
 
@@ -142,54 +197,43 @@ void main() {
 
 ### 11.3.1 x86-64 (Intel/AMD Server CPUs)
 
-Modern x86 CPUs with AVX-512 or AMX (Advanced Matrix Extensions) can run ternary models efficiently by unpacking to INT8 and using INT8 dot-product instructions.
+Modern x86 CPUs with AMX (Advanced Matrix Extensions) can run ternary models efficiently by unpacking to INT8.
+
+| CPU | Year | AMX INT8 TOPS | TDP | Notable |
+|-----|------|---------------|-----|--------|
+| Intel Xeon w9-3595X | 2024 | ~2.0 | 350W | 60 cores, AMX |
+| Intel Xeon 6 (Granite Rapids) | 2024 | ~3.0 | 350W | Improved AMX |
+| AMD EPYC 9755 (Turin) | 2024 | ~1.5 | 500W | 192 cores, AVX-512 |
 
 **Approach: Packed Ternary → AMX INT8 GEMM**
 
-Intel Sapphire Rapids (4th gen Xeon) and Emerald Rapids (5th gen Xeon) support AMX with INT8 throughput of up to 2048 INT8 ops/cycle per tile.
+Intel Sapphire Rapids+ support AMX with INT8 throughput of up to 2048 INT8 ops/cycle per tile. The key is using `_tile_dpbusd` (dot product of uint8 × int8 → int32) after unpacking ternary weights to INT8.
 
-```c
-// Pseudocode for AMX-based ternary GEMM
-void ternary_gemm_amx(
-    uint16_t* packed_weights,  // 10 trits per word
-    int8_t* activations,
-    float* scales,
-    float* output,
-    int M, int N
-) {
-    for (int m = 0; m < M; m++) {
-        // Unpack one row of ternary weights to INT8 buffer
-        int8_t unpacked[11008];  // Max row size
-        unpack_ternary_row(packed_weights + m * (N/10), unpacked, N);
+**Performance Estimates (1B parameter model, decode latency):**
 
-        // Use AMX tile for INT8 dot product
-        // AMX _tile_dpbusd: dot product of uint8 × int8 → int32
-        __tile_dpbusd(&tile_cfg, unpacked, activations);
+| CPU | Ternary Unpack | AMX GEMM | Total | Power | Efficiency |
+|-----|---------------|----------|-------|-------|------------|
+| Xeon w9-3595X | ~0.1 ms | ~3 ms | ~100 ms | 350W | 0.29 ms/J |
+| EPYC 9755 | ~0.15 ms | ~4 ms | ~130 ms | 500W | 0.26 ms/J |
 
-        // Apply scale factor
-        output[m] = scales[m] + (float)tile_accumulator[m];
-    }
-}
-```
-
-**Performance Estimate (Intel Xeon w9-3595X, 64 cores, AMX):**
-
-| Operation | Throughput |
-|-----------|-----------|
-| Ternary unpack (per core) | ~2 GB/s |
-| AMX INT8 GEMM | ~2 TOP/s per socket |
-| 1B param model, decode | ~80-120 ms/token |
-
-This is ~3-4× slower than an A100 GPU but uses ~10× less power (350W vs 400W, but the GPU is doing more work per watt for dense models).
+**Key insight:** CPUs are 3-5× slower than GPUs for ternary inference but use 2-3× less power. For edge servers with power constraints, CPUs may be the better choice.
 
 ### 11.3.2 ARM CPUs (Cortex-A, Apple M-series, AWS Graviton)
 
 ARM NEON and SVE2 provide SIMD dot-product instructions that can accelerate the unpacked ternary GEMM.
 
-**Apple M-series (M2/M3/M4):**
-- No dedicated INT8 matrix unit, but NEON can do 16 INT8 multiplies/cycle
+**Apple M-series (M2/M3/M4/M5):**
+- M2/M3: NEON 128-bit SIMD, 16 INT8 ops/cycle
+- M4/M5: Enhanced NEON with 2× INT8 throughput, 48 GB/s unified memory
 - Unified memory architecture means no CPU-GPU transfer overhead
-- Practical for models up to ~500M parameters (fits in unified memory)
+- Practical for models up to ~2B parameters (fits in 24-32 GB unified memory)
+
+| Chip | INT8 Ops/Cycle | Memory BW | Max Ternary Model |
+|------|---------------|-----------|-------------------|
+| M2 | 16 | 100 GB/s | ~500M |
+| M3 | 16 | 100 GB/s | ~700M |
+| M4 | 32 | 120 GB/s | ~1.5B |
+| M5 (projected) | 48 | 150 GB/s | ~2B |
 
 ```c
 // ARM NEON ternary unpack + accumulate
@@ -222,13 +266,14 @@ int32x4_t ternary_dot_product_neon(
 }
 ```
 
-**Performance Estimate (Apple M4, 1B parameter model):**
+**Performance Estimates (1B parameter model, decode latency):**
 
-| Metric | Value |
-|--------|-------|
-| Decode latency | ~200-300 ms/token |
-| Power | ~8-12W |
-| Tokens/joule | ~3-5 |
+| Chip | Decode Latency | Power | Tokens/Joule |
+|------|---------------|-------|-------------|
+| M2 | ~300-400 ms | 8-12W | ~2-3 |
+| M3 | ~250-350 ms | 8-12W | ~3-4 |
+| M4 | ~150-200 ms | 10-15W | ~5-7 |
+| M5 (projected) | ~100-150 ms | 10-15W | ~7-10 |
 
 ### 11.3.3 RISC-V (SiFive, Alibaba Xuantie)
 
@@ -240,46 +285,77 @@ RISC-V is relevant because the proposed ternary accelerator uses a RISC-V host C
 
 ## 11.4 NPU Deployment
 
-### 11.4.1 Qualcomm Hexagon (Snapdragon 8 Gen 3)
+### 11.4.1 Qualcomm Hexagon (Snapdragon 8 Gen 3/4)
 
-Qualcomm's Hexagon NPU supports INT8 and INT16 operations with dedicated matrix units. It does not natively support ternary, but the same unpack-then-GEMM approach works.
+Qualcomm's Hexagon NPU has evolved significantly:
+
+| NPU | Year | INT8 TOPS | Notable |
+|-----|------|-----------|--------|
+| Hexagon (SD 8 Gen 2) | 2022 | 26 | First with INT8 matrix |
+| Hexagon (SD 8 Gen 3) | 2023 | 45 | Improved HVX |
+| Hexagon (SD 8 Elite) | 2024 | 75 | 2× INT8 throughput |
 
 **Architecture:** Hexagon uses a scalar + HVX (Hexagon Vector eXtensions) architecture. HVX can do 128 INT8 multiplies/cycle.
 
-**Performance Estimate (Snapdragon 8 Gen 3):**
+**Performance Estimates (1B parameter model):**
 
-| Metric | Value |
-|--------|-------|
-| INT8 TOPS | ~45 TOP/s |
-| Decode (1B model) | ~150-250 ms/token |
-| Power | ~3-5W |
-| Model fit | Needs off-chip DRAM for 1B params |
+| NPU | Decode Latency | Power | Model Fit |
+|-----|---------------|-------|----------|
+| SD 8 Gen 3 | ~150-250 ms | 3-5W | Needs off-chip DRAM |
+| SD 8 Elite | ~80-120 ms | 4-6W | Partially in SRAM |
+
+**Key advantage:** On-device LLM inference without cloud connectivity. Ternary's 20× weight reduction enables 1B models to run on flagship smartphones.
 
 ### 11.4.2 Apple Neural Engine (ANE)
 
-The Apple Neural Engine is a proprietary matrix unit supporting INT8 and FP16. It is not programmable at a low level — models must be compiled via Core ML.
+The Apple Neural Engine is a proprietary matrix unit supporting INT8 and FP16.
 
-**Approach:** Convert ternary model to INT8 in Core ML format. The ANE will run INT8 GEMM natively. The ternary advantage comes from the smaller model size (200 MB vs 1 GB for INT8), which reduces memory bandwidth and may allow the model to fit in the ANE's internal SRAM.
+| ANE | Year | INT8 TOPS | Notable |
+|-----|------|-----------|--------|
+| ANE 16-core (A16) | 2022 | 17 | iPhone 14 Pro |
+| ANE 16-core (A17 Pro) | 2023 | 35 | iPhone 15 Pro |
+| ANE 16-core (M4) | 2024 | 38 | iPad Pro, MacBook |
+
+**Approach:** Convert ternary model to INT8 in Core ML format. The ANE will run INT8 GEMM natively. The ternary advantage comes from the smaller model size (200 MB vs 1 GB for INT8), reducing memory bandwidth.
 
 **Limitation:** The ANE's internal programming model is opaque. Custom ternary operations are not possible; you get whatever Core ML's quantization passes produce.
 
-### 11.4.3 Google EdgeTPU
+**Practical path:** Use `coremltools` to convert a ternary model (with weights dequantized to INT8) to Core ML format. The ANE handles the INT8 GEMM natively, while the CPU/GPU handles attention and other operations.
 
-The EdgeTPU is a purpose-built INT8 inference accelerator. It supports models in TFLite format with INT8 weights.
+### 11.4.3 Google EdgeTPU and Axion
 
-**Approach:** Same as ANE — convert ternary to INT8, let the EdgeTPU handle the INT8 GEMM. The ternary packing is only used for storage/compute-offload reduction.
+Google has expanded its AI accelerator portfolio:
 
-**Performance (EdgeTPU, 1B INT8 model):**
+| Accelerator | Year | INT8 TOPS | Power | Target |
+|-------------|------|-----------|-------|--------|
+| EdgeTPU (Coral) | 2019 | 4 | 2W | IoT/Edge |
+| EdgeTPU (2nd gen) | 2023 | 13 | 3W | Edge servers |
+| Google Axion (Arm-based) | 2024 | ~100 | 50W | Cloud/Edge |
 
-| Metric | Value |
-|--------|-------|
-| INT8 TOPS | 4 TOP/s |
-| Decode (1B model) | ~500 ms/token |
-| Power | ~2W |
+**Approach:** Same as ANE — convert ternary to INT8, let the accelerator handle the INT8 GEMM. The ternary packing is only used for storage/compute-offload reduction.
 
-### 11.4.4 Intel Neural Compute Engine (NCE) / AMD XDNA
+**Performance (1B parameter model):**
 
-Intel's NCE (in Meteor Lake and Lunar Lake) and AMD's XDNA (in Ryzeon AI) are NPUs designed for INT8/INT16 inference. Both follow the same pattern: convert ternary to INT8, deploy via ONNX Runtime or OpenVINO.
+| Accelerator | Decode Latency | Power |
+|-------------|---------------|-------|
+| EdgeTPU (2nd gen) | ~400-600 ms | 3W |
+| Axion | ~50-80 ms | 50W |
+
+**Note:** The EdgeTPU's 4 MB on-chip SRAM can only hold ~20M ternary parameters, requiring aggressive tiling for larger models. The Axion's higher memory capacity makes it more practical for 1B+ models.
+
+### 11.4.4 Intel NPU / AMD XDNA / MediaTek APU
+
+| NPU | Year | INT8 TOPS | Platform | Notable |
+|-----|------|-----------|----------|--------|
+| Intel Meteor Lake NPU | 2023 | 10 | Laptop | First Intel NPU |
+| Intel Lunar Lake NPU | 2024 | 48 | Laptop | 4× improvement |
+| AMD XDNA (Ryzen AI) | 2023 | 10 | Laptop | Ryzen 7040 series |
+| AMD XDNA 2 | 2024 | 50 | Laptop | Ryzen AI 300 series |
+| MediaTek Dimensity 9300 APU | 2024 | 46 | Mobile | On-device LLM |
+
+All follow the same pattern: convert ternary to INT8, deploy via ONNX Runtime or vendor SDK.
+
+**Key insight:** These NPUs are designed for low-power on-device inference. Ternary's 20× weight reduction is particularly valuable here, as it can reduce memory bandwidth requirements enough to enable on-device LLMs that would otherwise require too much DRAM access.
 
 ---
 
@@ -300,12 +376,7 @@ FPGAs are the most flexible platform for ternary acceleration because they allow
 
 ### 11.5.2 Recommended FPGA Boards
 
-| Board | FPGA | LUTs | BRAM | Cost | Best For |
-|-------|------|------|------|------|----------|
-| Xilinx ZCU104 | Zynq UltraScale+ | 274K | 32.1 Mb | $350 | Prototyping, ARM host |
-| Xilinx Alveo U250 | Virtex UltraScale+ | 1.7M | 265 Mb | $3K | Large models, HBM |
-| Intel Agilex 7 | AGI 027 | 2.7M | 128 Mb | $5K | High performance |
-| Lattice Certus-NX | Certus-NX | 19K | 3.8 Mb | $50 | Ultra-low power |
+> For a comprehensive board comparison with resource estimates, selection criteria, and pricing, see §16.3 of [16-fpga-experiment-guide.md](16-fpga-experiment-guide.md).
 
 ### 11.5.3 FPGA Architecture for Ternary Acceleration
 
@@ -340,48 +411,11 @@ FPGAs are the most flexible platform for ternary acceleration because they allow
 
 The 10→16 decoder maps naturally to FPGA LUTs. Each 16-bit word produces 10 trits (20 bits). This can be implemented as a combinational lookup:
 
-```verilog
-// 10-to-16 Trit Decoder (combinational)
-module trit_decoder_10to16 (
-    input  wire [15:0] packed_in,
-    output wire [19:0] trits_out   // 10 trits × 2 bits each
-);
-
-    // Base-3 digit extraction via division
-    wire [15:0] v0, v1, v2, v3, v4, v5, v6, v7, v8;
-
-    assign v0 = packed_in;
-    assign trits_out[1:0]  = v0 % 3;  // trit 0
-    assign v1 = v0 / 3;
-    assign trits_out[3:2]  = v1 % 3;  // trit 1
-    assign v2 = v1 / 3;
-    assign trits_out[5:4]  = v2 % 3;  // trit 2
-    // ... repeat for all 10 trits
-
-    // Note: Synthesis tool optimizes /3 and %3 into
-    // constant-division circuits (multiplication by reciprocal)
-    // For 16-bit / 3: approx 48 LUTs per divider
-    // Total decoder: ~500 LUTs for 10 trits
-
-endmodule
-```
-
-**Resource estimate:** ~500 LUTs per decoder. A 128-column array needs 128 decoders = ~64K LUTs (~23% of ZCU104).
+> For complete Verilog implementations of both 5→8 and 10→16 decoders with resource estimates, see §16.5 of [16-fpga-experiment-guide.md](16-fpga-experiment-guide.md).
 
 ### 11.5.5 PE Design in FPGA
 
-Each ternary PE needs:
-- 1 INT8 adder/subtractor: ~8 LUTs + 1 DSP slice
-- 1 zero-skip mux: ~4 LUTs
-- 1 accumulator register (32-bit): 32 flip-flops
-
-**Total per PE:** ~12 LUTs + 1 DSP + 32 FFs
-
-For a 64×64 PE array:
-- 4096 PEs
-- ~49K LUTs + 4096 DSP slices + 131K FFs
-
-This fits comfortably in a Zynq UltraScale+ but would need a larger FPGA (Alveo U250) for a 128×128 array.
+> For the complete Verilog PE design with timing analysis, see §12.3 of [12-custom-ternary-accelerator-design.md](12-custom-ternary-accelerator-design.md).
 
 ### 11.5.6 Performance Estimate (ZCU104, 64×64 PE array @ 200 MHz)
 
@@ -460,7 +494,11 @@ class PackedTernaryLinear(nn.Module):
         self.out_features = out_features
 
     def pack_weights(self, ternary_weight):
-        """Pack ternary weights into 10-trit-per-word format."""
+        """Pack ternary weights into 10-trit-per-word format.
+
+        10→16 packing encoding (base-3, -1→0, 0→1, +1→2).
+        See §4.2 of 04-storage-format.md for the canonical encoding spec.
+        """
         # Implementation: base-3 encoding of each 10-trit group
         w = ternary_weight.cpu().numpy()
         packed = []
@@ -518,15 +556,38 @@ Target hardware (NPU, DSP, etc.)
 
 ## 11.7 Summary: Current Hardware Capabilities
 
-| Platform | Ternary Native? | Packed Storage? | Effective INT8 GEMM? | Power | 1B Model Decode |
-|----------|----------------|-----------------|---------------------|-------|-----------------|
-| NVIDIA GPU | No (emulated) | Yes (software) | Yes (tensor cores) | 200-400W | ~45 ms |
-| AMD GPU | No (emulated) | Yes (software) | Yes (matrix cores) | 200-350W | ~80 ms |
-| Intel CPU (AMX) | No (emulated) | Yes (software) | Yes (AMX INT8) | 200-350W | ~100 ms |
-| Apple M4 | No (emulated) | Yes (software) | Partial (NEON) | 8-12W | ~250 ms |
-| Qualcomm Hexagon | No (emulated) | Yes (software) | Yes (HVX INT8) | 3-5W | ~200 ms |
-| Google EdgeTPU | No (must use INT8) | N/A | Yes (native INT8) | 2W | ~500 ms |
-| FPGA (ZCU104) | **Yes (custom)** | **Yes (hardware)** | N/A (ternary native) | 3-5W | ~50 ms |
-| **Ternary ASIC** | **Yes (native)** | **Yes (hardware)** | N/A (ternary native) | **2-10W** | **~50 µs** |
+### Desktop/Server
 
-**Key takeaway:** FPGAs are the only current platform that can implement the ternary add/sub/skip datapath natively. All other platforms must emulate ternary via unpacking to INT8/FP16, which recovers the storage/bandwidth advantage but loses the compute simplification advantage. This is exactly the gap a purpose-built ternary ASIC would fill.
+| Platform | Ternary Native? | INT8 GEMM | Power | 1B Model Decode | 7B Model Decode |
+|----------|----------------|-----------|-------|-----------------|-----------------|
+| NVIDIA B200 | No (emulated) | Yes (tensor cores) | 500W | ~5 ms | ~35 ms |
+| NVIDIA H100 | No (emulated) | Yes (tensor cores) | 350W | ~15 ms | ~100 ms |
+| NVIDIA A100 | No (emulated) | Yes (tensor cores) | 300W | ~45 ms | ~300 ms |
+| AMD MI300X | No (emulated) | Yes (matrix cores) | 750W | ~20 ms | ~140 ms |
+| Intel Xeon 6 (AMX) | No (emulated) | Yes (AMX INT8) | 350W | ~100 ms | ~700 ms |
+| Apple M4 | No (emulated) | Partial (NEON) | 15W | ~200 ms | ~1.4s |
+
+### Mobile/Edge
+
+| Platform | Ternary Native? | INT8 GEMM | Power | 1B Model Decode |
+|----------|----------------|-----------|-------|-----------------|
+| Snapdragon 8 Elite NPU | No (emulated) | Yes (HVX INT8) | 5W | ~100 ms |
+| Apple A17 Pro ANE | No (emulated) | Yes (native INT8) | 3W | ~150 ms |
+| Google EdgeTPU (2nd gen) | No (must use INT8) | Yes (native INT8) | 3W | ~500 ms |
+| Intel Lunar Lake NPU | No (emulated) | Yes (native INT8) | 5W | ~120 ms |
+| AMD XDNA 2 | No (emulated) | Yes (native INT8) | 5W | ~100 ms |
+
+### Specialized
+
+| Platform | Ternary Native? | INT8 GEMM | Power | 1B Model Decode |
+|----------|----------------|-----------|-------|-----------------|
+| FPGA (ZCU104) | **Yes (custom)** | N/A (ternary native) | 5W | ~50 ms |
+| FPGA (Alveo U250) | **Yes (custom)** | N/A (ternary native) | 25W | ~10 ms |
+| **Ternary ASIC (projected)** | **Yes (native)** | N/A (ternary native) | **5W** | **~50 µs** |
+
+**Key takeaways:**
+1. **FPGAs are the only current platform** that can implement the ternary add/sub/skip datapath natively
+2. **All other platforms emulate ternary** via unpacking to INT8/FP16, recovering storage/bandwidth but losing compute simplification
+3. **Blackwell B200** nearly closes the gap with custom ternary hardware for 1B models (~5 ms vs ~50 µs)
+4. **Mobile NPUs** (Snapdragon 8 Elite, Apple ANE) enable on-device 1B model inference thanks to ternary's 20× weight reduction
+5. **The custom ternary ASIC advantage** is most pronounced for edge devices (5W power envelope) where every operation counts

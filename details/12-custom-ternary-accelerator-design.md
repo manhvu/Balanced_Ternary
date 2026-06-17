@@ -680,7 +680,7 @@ def verify_gemm(packed_weights, activations, scale, rtl_sim):
 | Decode (1B) | ~50 µs | ~500 µs | ~30 µs | ~200 µs |
 | Power | 4W | 2W | 400W | ~3W |
 | Tokens/joule | ~5,000 | ~400 | ~75 | ~150 |
-| Process | 7nm | 28nm | 7nm | 5mm |
+| Process | 4nm | 28nm | 4nm | 5mm |
 | Customizable | Yes (RTL) | No | No | No |
 
 **Key advantage:** 10-30× better energy efficiency than any existing accelerator for ternary transformer inference, at the cost of being a fixed-function accelerator rather than a programmable processor.

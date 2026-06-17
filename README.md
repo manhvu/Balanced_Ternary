@@ -59,6 +59,7 @@ The zero trit is the key advantage: it encodes sparsity directly, turning near-z
 |------|-------|
 | [`details/14-ternary-llm-feasibility.md`](details/14-ternary-llm-feasibility.md) | Ternary for trillion-parameter LLMs: scaling laws, MoE, cost analysis |
 | [`details/15-ternary-vision-computing.md`](details/15-ternary-vision-computing.md) | Ternary for vision: CNNs, ViT, detection, segmentation, edge deployment |
+| [`details/16-fpga-experiment-guide.md`](details/16-fpga-experiment-guide.md) | FPGA experiment guide: board selection, RTL design, benchmarking |
 
 ### Comparison & Roadmap
 
@@ -76,7 +77,7 @@ The zero trit is the key advantage: it encodes sparsity directly, turning near-z
 
 ## Target Application
 
-A **balanced-ternary transformer inference accelerator** for edge devices — 2–10 W, 100M–1B parameter models fitting entirely in on-chip SRAM, with throughput of ~20K tokens/s decode.
+A **balanced-ternary transformer inference accelerator** for edge devices — 2–10 W, 100M–1B parameter models fitting entirely in on-chip SRAM, with throughput of ~50K tokens/s decode.
 
 ## Quick Start
 

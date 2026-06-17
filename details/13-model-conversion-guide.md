@@ -30,6 +30,13 @@ PTQ converts a pretrained model to ternary without any retraining. It is fast (m
 
 In Elixir, model weights are loaded from `.safetensors` or `.onnx` files using the `TernaryConverter.ModelLoader` module. For PyTorch `.pt` files, use the Python interop bridge or pre-export to `.safetensors`.
 
+**Supported model formats (2025):**
+- PyTorch `.pt` / `.bin` (via safetensors export)
+- SafeTensors `.safetensors` (HuggingFace default)
+- ONNX `.onnx` (via ONNX Runtime)
+- GGUF `.gguf` (llama.cpp format, via conversion)
+- TensorFlow SavedModel (via conversion)
+
 ```elixir
 # Load weights from a safetensors file
 {:ok, weights} = TernaryConverter.ModelLoader.load("model.safetensors")

@@ -286,6 +286,8 @@ It is the recommended trit encoding for the ternary accelerators described in th
 
 Testing the differential encoding path requires structured design-for-test (DFT) techniques to ensure manufacturing quality and field reliability. Three complementary strategies cover the full path:
 
+**Note**: These DFT techniques are compatible with modern 3nm/4nm processes and can be integrated with standard EDA toolflows (Synopsys, Cadence, Siemens).
+
 ### 1. Built-In Self-Test (BIST) for the Decoder
 
 Each weight decoder includes a BIST engine that exercises all three valid states and the invalid state without external probe access:

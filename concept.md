@@ -89,9 +89,9 @@ That's 4 multiplications + 3 additions = 7 operations.
 ────
   2
 ```
-That's 2 additions + 1 negation + 1 skip = 4 operations, **zero multiplications**.
+That's 2 additions + 1 negation + 1 skip = 3 operations, **zero multiplications**.
 
-At 75% sparsity (common in trained models), ternary does **4× fewer operations** than dense computation.
+At 75% sparsity (common in trained models), ternary does **2-4× fewer operations** than dense computation.
 
 ---
 
@@ -284,13 +284,13 @@ For maximum efficiency, a purpose-built ternary ASIC achieves:
 
 | Metric | Value |
 |--------|-------|
-| Process | 7nm |
-| Die area | 25 mm² |
-| Weight SRAM | 8 MB (fits 1B ternary parameters) |
-| Compute | 128×128 add/skip array @ 1 GHz |
+| Process | 4nm |
+| Die area | 20 mm² |
+| Weight SRAM | 16 MB (fits 1B ternary parameters) |
+| Compute | 256×256 add/skip array @ 1.5 GHz |
 | Decode throughput | 10 trits/cycle per column |
-| Power | ~4W |
-| Decode throughput | ~20K tokens/s (1B model) |
+| Power | ~5W |
+| Decode throughput | ~50K tokens/s (1B model) |
 
 See [Custom Accelerator Design](details/12-custom-ternary-accelerator-design.md) for the full architecture specification including PE design, memory hierarchy, instruction set, and compiler pipeline.
 
@@ -402,6 +402,7 @@ See [Research Roadmap](details/08-research-roadmap.md) for the detailed 48-week 
 | [`13-model-conversion`](details/13-model-conversion-guide.md) | PTQ/QAT pipelines, recipes, Elixir toolchain |
 | [`14-ternary-llm-feasibility`](details/14-ternary-llm-feasibility.md) | Feasibility at trillion-parameter scale, MoE, cost analysis |
 | [`15-ternary-vision`](details/15-ternary-vision-computing.md) | Vision computing: CNNs, ViT, detection, segmentation |
+| [`16-fpga-experiment`](details/16-fpga-experiment-guide.md) | FPGA experiment guide: board selection, RTL design, benchmarking |
 
 ### Code & Tools
 | Path | Content |

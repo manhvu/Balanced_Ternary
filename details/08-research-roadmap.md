@@ -381,12 +381,12 @@ Week 45-48: Tape-Out Package
 
 ### 8.7.1 Alternative: FPGA Product
 
-If ASIC tape-out cost ($2-5M at 7nm) is prohibitive, a standalone **FPGA product** is a viable alternative:
+If ASIC tape-out cost ($1-3M at 4nm) is prohibitive, a standalone **FPGA product** is a viable alternative:
 
 - **Xilinx Versal AI Core (VC1902)** or **Intel Agilex 7 (AGF014)** can host a ternary PE array of 256-512 PEs.
 - The PE array maps naturally to FPGA LUTs + DSP slices; the decoder (5→8, 10→16) is pure combinational logic.
 - **Main limitation: SRAM capacity.** On-chip BRAM on a large FPGA is ~30-50 MB, enough for a ~1B parameter ternary model (1 bit per weight + scale factors) but not for 7B+ without external HBM.
-- External HBM2e (available on Versal HBM variants) removes this ceiling, supporting up to 32 GB.
+- External HBM3e (available on Versal HBM variants) removes this ceiling, supporting up to 64 GB.
 - An FPGA product can ship within 12-18 months of a working RTL prototype, vs. 24-36 months for ASIC.
 
 ---
@@ -395,12 +395,12 @@ If ASIC tape-out cost ($2-5M at 7nm) is prohibitive, a standalone **FPGA product
 
 | Phase | Compute | Memory | People | Duration |
 |-------|---------|--------|--------|----------|
-| 0: Foundation | 1 GPU | 32 GB | 1-2 engineers | 4 weeks |
-| 1: Small Model | 4 GPUs | 64 GB | 2 engineers | 4 weeks |
-| 2: Transformer | 8 GPUs | 128 GB | 3-4 engineers | 6 weeks |
-| 3: Sparsity | 8 GPUs | 128 GB | 2 engineers | 4 weeks |
-| 4: Simulator | CPU cluster | 64 GB | 2 HW engineers | 6 weeks |
-| 5: FPGA | FPGA board | - | 2-3 HW engineers | 12 weeks |
+| 0: Foundation | 1 GPU (A100/H100) | 80 GB | 1-2 engineers | 4 weeks |
+| 1: Small Model | 4 GPUs | 320 GB | 2 engineers | 4 weeks |
+| 2: Transformer | 8 GPUs | 640 GB | 3-4 engineers | 6 weeks |
+| 3: Sparsity | 8 GPUs | 640 GB | 2 engineers | 4 weeks |
+| 4: Simulator | CPU cluster | 128 GB | 2 HW engineers | 6 weeks |
+| 5: FPGA | FPGA board (Alveo U250) | - | 2-3 HW engineers | 12 weeks |
 | 6: ASIC | EDA tools | - | 3-4 ASIC engineers | 12 weeks |
 
 ---

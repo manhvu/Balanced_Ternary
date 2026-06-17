@@ -155,13 +155,13 @@ Advantages:
 
 | Scheme | Trits | Bits | Efficiency | Alignment | Decode Cost |
 |--------|-------|------|------------|-----------|-------------|
-| 10→16  | 10    | 16   | 99%        | Half-word | Medium      |
+| 10→16  | 10    | 16   | 90%        | Half-word | Medium      |
 | 5→8    | 5     | 8    | 95%        | Byte      | Low         |
-| 3→5    | 3     | 5    | 95%        | Nibble+   | Low         |
-| 20→32  | 20    | 32   | 99%        | Word      | Higher      |
-| 13→21  | 13    | 21   | 99%        | N/A       | Medium      |
-| 2→4    | 2     | 4    | 79%        | Nibble    | Trivial     |
-| Naive 2b| 1    | 2    | 79%        | Any       | None        |
+| 3→5    | 3     | 5    | 84%        | Nibble+   | Low         |
+| 20→32  | 20    | 32   | 81%        | Word      | Higher      |
+| 13→21  | 13    | 21   | 76%        | N/A       | Medium      |
+| 2→4    | 2     | 4    | 56%        | Nibble    | Trivial     |
+| Naive 2b| 1    | 2    | 75%        | Any       | None        |
 
 **Recommended for hardware**: 5→8 (simple decoder, byte-aligned)
 **Recommended for storage**: 10→16 (high density, moderate decoder)
@@ -356,7 +356,7 @@ During a GEMM, stream packed data through a decoder that emits one row at a time
 
 ---
 
-## 4.12 Memory Bandwidth Calculation
+### 4.12 Memory Bandwidth Calculation
 
 ### Worked Example: 1B Parameter Model with 10→16 Packing
 
@@ -376,6 +376,13 @@ Transfer time  = 200 MB / 32 GB/s
               = 6.25 ms
 ```
 
+**Comparison with FP16/BF16:**
+
+```
+1B parameters × 16 bits = 2 GB
+Transfer time = 2 GB / 32 GB/s = 62.5 ms
+```
+
 **Comparison with FP32:**
 
 ```
@@ -383,9 +390,9 @@ Transfer time  = 200 MB / 32 GB/s
 Transfer time = 4 GB / 32 GB/s = 125 ms
 ```
 
-| Metric | Ternary (10→16) | FP32 | Ratio |
-|--------|-----------------|------|-------|
-| Storage | 200 MB | 4 GB | 20× |
-| Transfer time | 6.25 ms | 125 ms | 20× |
+| Metric | Ternary (10→16) | FP16/BF16 | FP32 | Ratio vs FP16 |
+|--------|-----------------|-----------|------|---------------|
+| Storage | 200 MB | 2 GB | 4 GB | 10× |
+| Transfer time | 6.25 ms | 62.5 ms | 125 ms | 10× |
 
-The 20× reduction in memory bandwidth directly translates to faster weight loading and lower energy per inference, since DRAM access dominates energy consumption in LLM serving.
+The 10× reduction in memory bandwidth vs FP16 directly translates to faster weight loading and lower energy per inference, since DRAM access dominates energy consumption in LLM serving.

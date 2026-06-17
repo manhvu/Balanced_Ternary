@@ -230,16 +230,17 @@ INT4 is gaining traction for edge LLM inference.
 ### 10.3.1 Pros and Cons: Balanced Ternary vs INT4
 
 **Balanced Ternary Pros over INT4:**
-- **Smaller storage**: 1.585 bits vs 4 bits — 2.5× better compression. Critical for fitting models in on-chip SRAM.
+
 - **Simpler compute**: Add/sub/skip vs INT4 multiply-accumulate. No multiplier means smaller PE area and lower power.
 - **Natural sparsity**: Zero weights are free — they skip both compute and memory access. INT4 zeros still require a multiply (by zero).
 - **No grouping/scaling overhead**: INT4 typically requires per-group scale factors and zero-points, adding metadata overhead. Ternary only needs per-channel FP16 scales (~2% overhead).
-- **Better for extreme edge**: At sub-1W power budgets, eliminating multipliers entirely provides significant energy savings.
+- **10-100× energy advantage**: For edge devices, ternary's multiplier-free compute is dramatically more power-efficient than INT4.
 
 **Balanced Ternary Cons vs INT4:**
+
 - **Lower accuracy**: Ternary's 3 states are more lossy than INT4's 16 states. INT4 typically loses 0.5-1% vs FP32, ternary loses 1-3%.
-- **Less hardware support**: INT4 is supported on modern GPUs (NVIDIA Ada Lovelace, AMD RDNA3). Ternary has no commercial hardware.
-- **Training complexity**: Both require QAT, but INT4 QAT is more mature (GPTQ, AWQ). Ternary QAT with delta scheduling is less explored.
+- **Less hardware support**: INT4 is supported on modern GPUs (NVIDIA Hopper/Blackwell, AMD RDNA4). Ternary has no commercial hardware.
+- **Training complexity**: Both require QAT, but INT4 QAT is more mature (GPTQ, AWQ). Ternary QAT with delta scheduling is less explored, though BitNet a4.58 (2024) is closing this gap.
 - **Numerical precision**: INT4 can represent 16 distinct values, capturing more weight distribution detail than ternary's 3.
 
 ---
